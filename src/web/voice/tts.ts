@@ -599,6 +599,19 @@ export function containsCjk(text: string): boolean {
   return CLIENT_CJK.test(text);
 }
 
+/**
+ * 「这段文本值不值得念」：只要有一个字母或数字就算。
+ *
+ * 为什么需要它：`splitSpeech` 会把 `"……"` 这类纯标点切成分句，而 `…`(U+2026) 不在 CJK
+ * 区间里 → 被判成英文 → 打到未配置的 Deepgram → 503 → 降级出第二个音色。
+ * 纯标点本来就没有声音可念，直接不派发是最省事也最正确的处理。
+ */
+const SPEAKABLE = /[\p{L}\p{N}]/u;
+
+export function isSpeakable(text: string): boolean {
+  return SPEAKABLE.test(text);
+}
+
 export type VoiceTtsTier = "edge" | "deepgram" | "browser";
 
 /** 路由层看到的能力：中文看 `ttsZh`（Edge CLI），英文看 `tts`（Deepgram key） */
@@ -773,6 +786,11 @@ export interface RoutedTtsOptions {
    * 只在首句触发，不打断对话、不弹窗。
    */
   onBrowserFallback?: (reason: string) => void;
+  /**
+   * 某一句重试后仍然没有合成出来、最终**没有出声**时回调（诊断区用它说明原因）。
+   * 注意语义：这里**不会**降级到本机音 —— 角色音色必须唯一，第二个音色比一句静音更糟。
+   */
+  onSynthIssue?: (reason: string) => void;
 }
 
 /** 同时在飞的合成请求数：1 个当前句 + 1 个预取。服务端也限 2 个 CLI 进程，正好对齐。 */
@@ -794,6 +812,15 @@ interface JobState {
   done: boolean;
   /** 失败原因（没有拿到任何音频时才有值） */
   failed: string | null;
+  /**
+   * 这句是否**真的**收到过音频分片。
+   *
+   * 不能用 `chunks.length === 0` 判断：队首那句的分片会被 `drain()` 立刻交给播放器
+   * 并从数组里 shift 掉，于是「合成完整但正在播」的句子看起来和「一个字都没合成出来」
+   * 一模一样 —— 误判成 empty-audio 之后每句都会用本机音再念一遍，用户听到两个声音
+   * 同时说话（2026-10-28 复现并修复）。
+   */
+  gotAudio: boolean;
 }
 
 /**
@@ -825,6 +852,7 @@ export class RoutedTTS implements TTSProvider {
   private readonly speakRequest: SpeakRequest;
   private readonly speakStream: SpeakStream | null;
   private readonly onBrowserFallback: ((reason: string) => void) | null;
+  private readonly onSynthIssue: ((reason: string) => void) | null;
 
   constructor(options: RoutedTtsOptions = {}) {
     this.lang = options.lang ?? "zh-CN";
@@ -838,6 +866,7 @@ export class RoutedTTS implements TTSProvider {
           : createSpeakStream()
         : options.speakStream;
     this.onBrowserFallback = options.onBrowserFallback ?? null;
+    this.onSynthIssue = options.onSynthIssue ?? null;
   }
 
   get name(): string {
@@ -912,9 +941,25 @@ export class RoutedTTS implements TTSProvider {
   // ------------------------------------------------------------ 内部
 
   private dispatch(segment: string): void {
-    const tier = selectTtsChannel(segment, this.getStatus());
+    // 纯标点碎片（`"…"` 这种）既不该发合成请求，也不该出声。
+    if (!isSpeakable(segment)) return;
+    const status = this.getStatus();
+    let tier = selectTtsChannel(segment, status);
+    // 单音色收敛：主音色（Edge）可用时，纯英文碎片也交给同一条服务端管道。
+    // 否则「中文句 + 夹带英文」天然会拆成角色音 + 系统音两路 —— 那是双声的温床。
+    if (tier === "browser" && status?.ttsZh === true) tier = "edge";
     if (tier === "browser") {
       // 走到这里说明没有服务端音色可用：本机合成音，首句在诊断区说明一次
+      // 硬约束：任何时刻只允许一个音色出声。角色音频正在播时插入系统音，
+      // 用户听到的就是两个人同时说话 —— 宁可这一句只有字幕。
+      // 不只看「正在出声」，还要看「已经在飞/排队」：Edge 请求还没回来时
+      // `stream.isSpeaking` 是 false，此时插入系统音，几百毫秒后 Edge 首片到达
+      // 就会两路同时说（reviewer 抓到的时差窗口，2026-10-28）。
+      if (this.serverPending()) {
+        this.lastErrorValue = "角色音正在合成或播放，本机音会与之重叠：这一句只显示字幕";
+        this.onSynthIssue?.(this.lastErrorValue);
+        return;
+      }
       this.noticeBrowserFallback(containsCjk(segment) ? "本机合成音（非角色音色）" : "浏览器合成音");
       this.ensureBrowser().speak(segment);
       return;
@@ -947,13 +992,20 @@ export class RoutedTTS implements TTSProvider {
    */
   private async runSynth(job: SynthJob): Promise<void> {
     const generation = this.generation;
-    const state: JobState = { job, chunks: [], done: false, failed: null };
+    const state: JobState = { job, chunks: [], done: false, failed: null, gotAudio: false };
     this.jobs.set(job.order, state);
-    try {
-      if (this.speakStream) await this.runSynthStreaming(state, generation);
-      else await this.runSynthBuffered(state, generation);
-    } catch (err) {
-      state.failed = state.failed ?? (err instanceof Error ? err.message : "network");
+    await this.synthAttempt(state, generation);
+    // 重试一次：503 `not-configured` 实测是服务端原生 WS 的探测竞态
+    // （同一轮里 4271ms 那句失败、5708ms 的同批请求就成功），第二次几乎必成。
+    // 没有这次重试，一次偶发就等价于「这一句永远没声音」。
+    // 只在「一个字都还没送进播放器」时重试。
+    // 已经出过声的句子重试会让前半句从 0 再播一遍（用户听到重播/破音），
+    // 那种情况下宁可这一句就此静音（字幕仍在）。
+    if (state.failed && !state.gotAudio && generation === this.generation) {
+      state.failed = null;
+      state.chunks.length = 0;
+      state.gotAudio = false;
+      await this.synthAttempt(state, generation);
     }
     // 打断之后回来的音频：不占槽、不入队、不出声（cancel 已经把计数器清零）
     if (generation !== this.generation) {
@@ -964,6 +1016,16 @@ export class RoutedTTS implements TTSProvider {
     this.synthInflight = Math.max(0, this.synthInflight - 1);
     this.drain();
     this.pumpSynth();
+  }
+
+  /** 单次合成尝试（不含重试）。失败只记原因，由 `runSynth` 决定是否再试。 */
+  private async synthAttempt(state: JobState, generation: number): Promise<void> {
+    try {
+      if (this.speakStream) await this.runSynthStreaming(state, generation);
+      else await this.runSynthBuffered(state, generation);
+    } catch (err) {
+      state.failed = state.failed ?? (err instanceof Error ? err.message : "network");
+    }
   }
 
   /** 流式：按 ~1KB 聚合后入队，句尾的零头在流结束时补上（不能丢，丢了句尾缺字） */
@@ -986,6 +1048,7 @@ export class RoutedTTS implements TTSProvider {
         pendingBytes += chunk.byteLength;
         if (pendingBytes < MIN_AUDIO_CHUNK_BYTES) continue;
         state.chunks.push(`data:audio/mpeg;base64,${bytesToBase64(mergeBytes(pending))}`);
+        state.gotAudio = true;
         pending = [];
         pendingBytes = 0;
         this.drain();
@@ -993,11 +1056,12 @@ export class RoutedTTS implements TTSProvider {
     } finally {
       if (generation === this.generation && pendingBytes > 0) {
         state.chunks.push(`data:audio/mpeg;base64,${bytesToBase64(mergeBytes(pending))}`);
+        state.gotAudio = true;
       }
     }
     if (generation !== this.generation) return;
     // 连一块音频都没收到：当成这句失败，交给本机音兜底
-    if (state.chunks.length === 0 && !state.failed) state.failed = "empty-audio";
+    if (!state.gotAudio && !state.failed) state.failed = "empty-audio";
   }
 
   /** 整块：既有行为，一字不变地保留（Deepgram 英文路径就是这条） */
@@ -1006,6 +1070,7 @@ export class RoutedTTS implements TTSProvider {
     if (generation !== this.generation) return;
     if (result.ok) {
       state.chunks.push(`data:audio/mpeg;base64,${bytesToBase64(new Uint8Array(result.bytes))}`);
+      state.gotAudio = true;
     } else {
       state.failed = result.reason;
     }
@@ -1024,18 +1089,33 @@ export class RoutedTTS implements TTSProvider {
         const dataUrl = state.chunks.shift();
         if (!dataUrl) break;
         this.seq += 1;
+        // 最后一道硬保证：系统音正在播时绝不让角色音叠上去。
+        // 上层路由已经尽量避免这种组合，这里是兜底 —— 谁先出声谁不被打断是次要的，
+        // 「只有一个音色」是硬要求。
+        if (this.browser?.isSpeaking === true) this.browser.cancel();
         this.ensureStream().pushChunk({ seq: this.seq, dataUrl, mime: "audio/mpeg" });
       }
       if (!state.done) return;
       this.jobs.delete(state.job.order);
       this.synthHead += 1;
       if (state.failed) {
-        // 预取/合成失败只降级**这一句**：下一句该走哪条还走哪条，不整轮降级
+        // 重试也失败：**只静音这一句**（字幕照常），绝不启用第二个音色。
+        // 旧实现在这里 `ensureBrowser().speak()` 补念，而此刻上一句的角色音频还在播，
+        // 用户听到的就是两个声音同时说话（2026-10-28 实测复现）。
         this.lastErrorValue = `${state.job.tier} tts: ${state.failed}`;
-        this.noticeBrowserFallback(`合成失败改本机音（${state.failed}）`);
-        this.ensureBrowser().speak(state.job.text);
+        this.onSynthIssue?.(`这一句没有合成出来（${state.failed}），只有字幕`);
       }
     }
+  }
+
+  /** 本轮是否已有服务端音色在飞、在排队或在播（含尚未返回首片的拉取窗口） */
+  private serverPending(): boolean {
+    return (
+      this.synthInflight > 0 ||
+      this.synthQueue.length > 0 ||
+      this.jobs.size > 0 ||
+      this.stream?.isSpeaking === true
+    );
   }
 
   private noticeBrowserFallback(reason: string): void {

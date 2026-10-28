@@ -146,6 +146,8 @@ export function App() {
         getStatus: () => voiceStatusRef.current,
         // 第一次用上本机合成音时在诊断区说明一句（不打断对话、不弹窗）
         onBrowserFallback: (reason) => reportVoiceChannel({ ttsNote: reason }),
+        // 单句合成失败 → 只有字幕，不出第二个音色（原因上报到诊断区）
+        onSynthIssue: (reason) => reportVoiceChannel({ ttsNote: reason }),
       }),
     [boot],
   );

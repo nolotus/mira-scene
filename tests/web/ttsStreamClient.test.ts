@@ -120,21 +120,111 @@ describe("2 槽预取不乱序（字幕同步的命门）", () => {
     tts.dispose();
   });
 
-  test("某一句流失败 → 只降级这一句（本机音），下一句照常走流", async () => {
-    const spoken: string[] = [];
+  test("某一句流失败 → 重试一次；仍失败只静音这一句，绝不出第二个音色", async () => {
+    const issues: string[] = [];
+    const fallbacks: string[] = [];
+    let badCalls = 0;
     const speakStream: SpeakStream = async (text) => {
-      if (text.startsWith("坏")) return { ok: false, reason: "tts-unavailable" };
+      if (text.startsWith("坏")) {
+        badCalls += 1;
+        return { ok: false, reason: "tts-unavailable" };
+      }
       return { ok: true, chunks: (async function* () { yield new Uint8Array(1200); })() };
     };
     const tts = new RoutedTTS({
       getStatus: status,
       speakStream,
-      onBrowserFallback: () => spoken.push("fallback"),
+      onBrowserFallback: () => fallbacks.push("fallback"),
+      onSynthIssue: (reason) => issues.push(reason),
     });
     tts.speak("坏句。好句。");
-    await tick(20);
-    expect(spoken).toEqual(["fallback"]); // 只报一次
+    await tick(40);
+    expect(badCalls).toBe(2); // 首发 + 一次重试
+    expect(issues.length).toBe(1); // 只报一次
+    expect(fallbacks).toEqual([]); // 绝不启用本机音（双声的根因）
     expect(pushed.length).toBe(1); // 好句仍然出了音频
+    tts.dispose();
+  });
+
+  test("重试成功就不算失败（服务端探测竞态的真实形态）", async () => {
+    let calls = 0;
+    const speakStream: SpeakStream = async () => {
+      calls += 1;
+      if (calls === 1) return { ok: false, reason: "not-configured" };
+      return { ok: true, chunks: (async function* () { yield new Uint8Array(1200); })() };
+    };
+    const tts = new RoutedTTS({
+      getStatus: status,
+      speakStream,
+      onSynthIssue: () => {
+        throw new Error("重试成功时不该报 issue");
+      },
+    });
+    tts.speak("只有一句。");
+    await tick(40);
+    expect(calls).toBe(2);
+    expect(pushed.length).toBe(1);
+    tts.dispose();
+  });
+
+  test("纯标点片段不发请求也不出声（`…` 曾被判成英文 → 503 → 第二个音色）", async () => {
+    let calls = 0;
+    const speakStream: SpeakStream = async () => {
+      calls += 1;
+      return { ok: true, chunks: (async function* () { yield new Uint8Array(1200); })() };
+    };
+    const tts = new RoutedTTS({ getStatus: status, speakStream });
+    tts.speak("……");
+    tts.speak("。");
+    tts.flush();
+    await tick(20);
+    expect(calls).toBe(0);
+    expect(pushed.length).toBe(0);
+    tts.dispose();
+  });
+
+  test("主音色可用时，夹带的英文碎片也走角色管道（不启系统音）", async () => {
+    const texts: string[] = [];
+    const speakStream: SpeakStream = async (text) => {
+      texts.push(text);
+      return { ok: true, chunks: (async function* () { yield new Uint8Array(1200); })() };
+    };
+    const tts = new RoutedTTS({
+      getStatus: status,
+      speakStream,
+      onBrowserFallback: () => {
+        throw new Error("主音色可用时不该启用系统音");
+      },
+    });
+    tts.speak("OK。你好。");
+    await tick(30);
+    expect(texts).toEqual(["OK。", "你好。"]); // 两句都交给同一条服务端管道
+    tts.dispose();
+  });
+
+  test("已经出声的句子中途断流 → 不重试（否则前半句会重播）", async () => {
+    let calls = 0;
+    const speakStream: SpeakStream = async () => {
+      calls += 1;
+      return {
+        ok: true,
+        chunks: (async function* () {
+          yield new Uint8Array(1200);
+          throw new Error("network");
+        })(),
+      };
+    };
+    const issues: string[] = [];
+    const tts = new RoutedTTS({
+      getStatus: status,
+      speakStream,
+      onSynthIssue: (reason) => issues.push(reason),
+    });
+    tts.speak("半句就断。");
+    await tick(40);
+    expect(calls).toBe(1); // 不重试
+    expect(pushed.length).toBe(1); // 只有已经送出的那一块，没有从头再来
+    expect(issues.length).toBe(1);
     tts.dispose();
   });
 });
