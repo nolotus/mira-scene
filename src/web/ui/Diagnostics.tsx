@@ -11,6 +11,10 @@
 import type { SessionView } from "../state/store";
 import { latestClipDiagnostic, useClipDiagnostics } from "../stage/clip/clipBus";
 import { clipPhaseLabel } from "../stage/clip/clipState";
+import { useIllustrationRecords, useIllustrationState } from "../stage/illustration/illustrationRuntime";
+import { illustrationPhaseLabel } from "../stage/illustration/illustrationState";
+import { useVoiceChannel } from "../voice/voiceDiag";
+import { sttChannelLabel, ttsTierLabel } from "../voice/voiceStatus";
 import type { DemoFlags } from "./demo";
 
 export interface DiagnosticsProps {
@@ -40,8 +44,14 @@ const MIC_LABEL: Record<SessionView["mic"], string> = {
 export function Diagnostics(props: DiagnosticsProps) {
   const { view } = props;
   const clipRecords = useClipDiagnostics();
+  const voice = useVoiceChannel();
   const clipLatest = latestClipDiagnostic(clipRecords);
   const clipFailed = clipLatest?.phase === "failed";
+  // 生成式插图：未配置 / 超配额一律 info（不染色），只有上游失败那行是 error 才红标
+  const illustration = useIllustrationState();
+  const illustrationRecords = useIllustrationRecords();
+  const illustrationLatest = illustrationRecords.length > 0 ? illustrationRecords[illustrationRecords.length - 1]! : null;
+  const illustrationFailed = illustrationLatest?.tone === "error";
   const rows: Array<[string, string, string?]> = [
     [
       "首字延迟",
@@ -61,12 +71,24 @@ export function Diagnostics(props: DiagnosticsProps) {
     ["麦克风", MIC_LABEL[view.mic]],
     ["安全上下文", props.secureContext === false ? "否（http，麦克风必失败）" : "是"],
     ["语音识别", props.speechSupported ? "可用" : "不支持"],
+    [
+      "语音通道",
+      `STT=${sttChannelLabel(voice.stt)} · TTS=${ttsTierLabel(voice.tts)}`,
+      voice.reason
+        ? `已回退：${voice.reason}`
+        : "Deepgram 经服务端代理（key 不进浏览器）；未配置 key 时回退 Web Speech / 浏览器 TTS",
+    ],
     ["演示模式", props.demo.active ? `开（?demo=${props.demo.raw}）` : "关"],
     ["轮次", String(view.turns)],
     [
       "媒体片段",
       clipLatest ? clipPhaseLabel(clipLatest.phase) : "未播放",
       "storm 演出触发的 spritesheet 片段（12 帧 @12fps）",
+    ],
+    [
+      "生成式插图",
+      illustrationPhaseLabel(illustration.phase),
+      illustrationLatest?.detail ?? "storm 命中 + 片段结束后触发；未配置/超配额静默回落",
     ],
   ];
 
@@ -75,6 +97,7 @@ export function Diagnostics(props: DiagnosticsProps) {
       <summary className="mira-diag__summary">
         诊断
         {clipFailed ? <span className="mira-diag__alert">片段失败</span> : null}
+        {illustrationFailed ? <span className="mira-diag__alert">插图失败</span> : null}
       </summary>
       <dl className="mira-diag__grid">
         {rows.map(([label, value, hint]) => (
@@ -88,6 +111,15 @@ export function Diagnostics(props: DiagnosticsProps) {
       {clipRecords.length > 0 ? (
         <ul className="mira-diag__clip" data-clip-phase={clipLatest?.phase ?? "idle"}>
           {clipRecords.slice(-3).map((record) => (
+            <li key={record.id} data-tone={record.tone}>
+              {record.detail}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {illustrationRecords.length > 0 ? (
+        <ul className="mira-diag__illus" data-illus-phase={illustration.phase}>
+          {illustrationRecords.slice(-3).map((record) => (
             <li key={record.id} data-tone={record.tone}>
               {record.detail}
             </li>

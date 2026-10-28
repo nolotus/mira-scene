@@ -37,9 +37,20 @@ export const LLM_DEFAULTS = {
   },
 } as const;
 
+/**
+ * Deepgram 语音凭据（STT + TTS 共用同一个 key）。
+ * null = 没配 key，语音通道整体不可用 —— 这是**正常状态**（纯文字对话仍然完整可跑），
+ * 所以 /api/voice/status 会如实回 stt:false / tts:false，而不是报错。
+ */
+export interface DeepgramConfig {
+  apiKey: string;
+}
+
 export interface ServerConfig {
   port: number;
   isProd: boolean;
+  /** 语音凭据；null = 未配置（语音通道关闭，文字通道不受影响） */
+  deepgram: DeepgramConfig | null;
   /**
    * 环境变量显式请求的档位（`DIRECTOR=live|mock`）；null = 没设置，默认 Mock。
    * 注意这只表示「环境想要什么」，会话实际用哪个档位由 resolveDirectorMode() 决定。
@@ -99,6 +110,14 @@ export function resolveLlmProvider(env: Record<string, string | undefined>): Llm
   return null;
 }
 
+/** 读 DEEPGRAM_API_KEY。缺了就返回 null（未配置，正常状态）。 */
+export function resolveDeepgramConfig(
+  env: Record<string, string | undefined>,
+): DeepgramConfig | null {
+  const apiKey = trimToNull(env.DEEPGRAM_API_KEY);
+  return apiKey ? { apiKey } : null;
+}
+
 function toPort(raw: string | undefined): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) return DEFAULT_PORT;
@@ -125,6 +144,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   return {
     port: toPort(env.SERVER_PORT),
     isProd: (env.NODE_ENV ?? "development").trim() === "production",
+    deepgram: resolveDeepgramConfig(env),
     directorEnvMode,
     directorMode: defaults.mode,
     llm,

@@ -15,6 +15,7 @@ import type { StageProps } from "../../shared/protocol";
 import { Character } from "./Character";
 import { ClipPlayer } from "./clip/ClipPlayer";
 import { Cues } from "./Cues";
+import { IllustrationLayer } from "./illustration/IllustrationLayer";
 import { StageBackdrop } from "./StageBackdrop";
 import { STATUS_LABEL, toneOf, vfxVars } from "./visuals";
 import "../styles/stage.css";
@@ -66,6 +67,8 @@ export function Stage({ state, onBranchPick }: StageProps) {
           <Cues state={state} />
           {/* 真媒体片段（spritesheet）：storm 演出命中时播一次；层级在角色之上、字幕之下 */}
           <ClipPlayer state={state} />
+          {/* 生成式插图：与片段同源但排在它之后（片段先播完才请求），层级夹在片段与字幕之间 */}
+          <IllustrationLayer state={state} />
         </div>
 
         <header className="stage-hud" aria-hidden="true">

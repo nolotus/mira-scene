@@ -22,20 +22,27 @@ import {
   CLIP_FRAMES,
   CLIP_ID,
   IDLE_CLIP,
+  IDLE_SLOT,
+  RUNNING_SLOT,
   abortReasonLabel,
   clipReducer,
   clipSrcFor,
   clipVisible,
+  decideClipStart,
   frameAt,
   isStormShot,
+  settleClipSlot,
   type AbortReason,
+  type ClipOutcome,
   type ClipState,
+  type ClipSlotState,
 } from "./clipState";
 import {
   hasPlayedClip,
   markClipPlayed,
   recordClipDiagnostic,
   registerClipAbort,
+  reportClipPhase,
   subscribeSessionSignal,
 } from "./clipBus";
 import "./clip.css";
@@ -73,6 +80,15 @@ export function ClipPlayer({ state, onEnded, onFailed }: ClipPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   /** 当前这一次播放的中止入口；外部（会话信号 / 用户打断）都打到它 */
   const abortRef = useRef<((reason: AbortReason) => void) | null>(null);
+  /**
+   * 播放槽：一次播放是否还占着位置。用 ref 是因为它必须**同步**生效
+   * （StrictMode 的双次 effect / 同一帧内的重复触发都不能起第二段播放）；
+   * 变化时靠 slotVersion 这个计数器把触发 effect 叫醒一次。
+   */
+  const slotRef = useRef<ClipSlotState>(IDLE_SLOT);
+  const [slotVersion, setSlotVersion] = useState(0);
+  /** 卸载后迟到的收尾不再碰状态（也不该再记为已播） */
+  const alive = useRef(true);
   const endedFired = useRef(false);
 
   const callbacks = useRef({ onEnded, onFailed });
@@ -102,12 +118,29 @@ export function ClipPlayer({ state, onEnded, onFailed }: ClipPlayerProps) {
   // 供外部调用（以及未来接到别的打断源）
   useEffect(() => registerClipAbort((reason) => abortRef.current?.(reason)), []);
 
+  // 相位上报：单向广播，不改变本播放器的任何行为（插图层靠它「等片段让出画面」）
+  useEffect(() => {
+    reportClipPhase(clip.phase);
+  }, [clip.phase]);
+
   /**
-   * 开始一次播放。返回中止函数。
+   * 一次播放的收尾：释放播放槽 + 决定「算不算已播」（语义见 clipState.settleClipSlot）。
+   * 自然播完 / 失败 / 被打断三条路径都必须走到这里 —— 这是「打断一次就再也播不出来」的修复点。
+   */
+  const settle = useCallback((outcome: ClipOutcome) => {
+    const next = settleClipSlot(slotRef.current, outcome);
+    slotRef.current = next.slot;
+    if (next.played) markClipPlayed(CLIP_ID);
+    if (!alive.current) return;
+    setSlotVersion((n) => n + 1);
+  }, []);
+
+  /**
+   * 开始一次播放。返回中止函数。收尾（含被打断）一律通过 onSettle 交回播放槽。
    * 关键：所有 await 之后都要再查一次 cancelled —— 打断之后回来的结果一律丢弃，
    * 所以不存在「abort 了又被回调把画面拉回来」的窗口。
    */
-  const startPlayback = useCallback((source: string) => {
+  const startPlayback = useCallback((source: string, onSettle: (outcome: ClipOutcome) => void) => {
     let cancelled = false;
     let raf: number | null = null;
     let objectUrl: string | null = null;
@@ -133,6 +166,9 @@ export function ClipPlayer({ state, onEnded, onFailed }: ClipPlayerProps) {
       stopRaf();
       release();
       setClip((prev) => clipReducer(prev, { type: "abort", reason }).state);
+      // 打断也要收尾：释放播放槽（否则就是一把永不释放的锁），并且算已播 ——
+      // 打断是用户主动要求停止，若不算已播，用户每次暴雨都会被同一条片段再打断一次。
+      onSettle("aborted");
       recordClipDiagnostic(
         "interrupted",
         CLIP_ID,
@@ -147,8 +183,8 @@ export function ClipPlayer({ state, onEnded, onFailed }: ClipPlayerProps) {
       cancelled = true;
       stopRaf();
       release();
-      // 同一会话不再拿同一条片段反复撞墙
-      markClipPlayed(CLIP_ID);
+      // 同一会话不再拿同一条片段反复撞墙（收尾统一走播放槽：释放槽 + 记已播）
+      onSettle("failed");
       setClip((prev) => clipReducer(prev, { type: "error", message }).state);
       recordClipDiagnostic("failed", CLIP_ID, detail, "error");
       callbacks.current.onFailed?.(message);
@@ -172,7 +208,6 @@ export function ClipPlayer({ state, onEnded, onFailed }: ClipPlayerProps) {
         await image.decode(); // 解码失败会在这里抛，走同一条失败路径
         if (cancelled) return;
 
-        markClipPlayed(CLIP_ID);
         setClip((prev) => clipReducer(prev, { type: "loaded" }).state);
         recordClipDiagnostic("playing", CLIP_ID, `播放中：${CLIP_FRAMES} 帧 @12fps`, "info");
 
@@ -186,6 +221,7 @@ export function ClipPlayer({ state, onEnded, onFailed }: ClipPlayerProps) {
           if (elapsed >= CLIP_DURATION_MS) {
             cancelled = true;
             setClip((prev) => clipReducer(prev, { type: "ended" }).state);
+            onSettle("ended");
             recordClipDiagnostic(
               "ended",
               CLIP_ID,
@@ -213,17 +249,28 @@ export function ClipPlayer({ state, onEnded, onFailed }: ClipPlayerProps) {
   // 触发：storm 演出命中时才播，且同一会话同一片段只播一次。
   // 注意这里不把「storm 变回 false」当成中止条件：闪电强度会自然衰减，
   // 片段的生命周期由播放器自己（以及会话打断）负责。
+  //
+  // 闸门只看三件事（decideClipStart）：storm 是否命中、播放槽是否被占、本会话是否已播。
+  // 以前这里的「槽」是 `stopRef.current !== null`，而打断路径从不清它 ——
+  // 于是打断一次之后本会话再也进不来，连新会话该不该播都轮不到判断。
   const stopRef = useRef<((reason?: AbortReason) => void) | null>(null);
   useEffect(() => {
-    if (!storm) return;
-    if (stopRef.current !== null) return;
-    if (hasPlayedClip(CLIP_ID)) return;
-    stopRef.current = startPlayback(src);
-  }, [storm, src, startPlayback]);
+    const decision = decideClipStart({
+      storm,
+      occupied: slotRef.current.occupied,
+      played: hasPlayedClip(CLIP_ID),
+    });
+    if (decision !== "start") return;
+    // 先占槽（同步生效）再启动：StrictMode 的双次 effect / 同一帧的重复触发都不会起第二段
+    slotRef.current = RUNNING_SLOT;
+    stopRef.current = startPlayback(src, settle);
+  }, [storm, src, startPlayback, settle, slotVersion]);
 
   // 卸载：等价于一次中止（不写诊断，这不是运行时故障）
   useEffect(() => {
+    alive.current = true;
     return () => {
+      alive.current = false;
       stopRef.current?.("user");
       stopRef.current = null;
     };

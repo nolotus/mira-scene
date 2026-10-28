@@ -5,6 +5,10 @@
  * 能量 VAD 分不清「用户说话」和「外放的 TTS 回声」，所以真正决定是否触发的
  * 是 `SpeechTriggerGate`（阈值 + 持续时长 + 回声守卫），见 state/bargeIn.ts。
  *
+ * 「角色是否在说话」由本文件自己的朗读相位决定（SpeechPhaseTracker），
+ * 而不是裸的 `speechSynthesis.speaking`：后者在 cancel() 之后会滞后 100–300ms，
+ * 足够把用户打断后立刻接的第一句话当成回声吞掉。
+ *
  * 麦克风不可用（无权限/无设备）时 start() 返回 false，UI 退化为
  * 「按住说话 / 打断键」这套显式交互，绝不假装在听。
  */
@@ -37,8 +41,9 @@ export interface VadOptions {
   /** 回声自打断守卫（只作用于 VAD 触发的打断，按钮/Esc 不经过这里） */
   echoGuard?: Partial<EchoGuardConfig>;
   /**
-   * 「角色正在出声吗」的探针；默认读 `speechSynthesis.speaking`。
-   * 浏览器 TTS 就是回声源，所以默认探针即最直接的真值来源。
+   * 「角色正在出声吗」的探针；默认用我们自己的朗读相位（见 SpeechPhaseTracker）。
+   * 刻意**不**直接读 `speechSynthesis.speaking`：那个标志在 cancel() 后滞后 100–300ms，
+   * 会把用户打断后立刻接的第一句当成回声吞掉。
    */
   speakingProbe?: SpeakingProbe;
   onSpeech?(): void;
@@ -95,30 +100,162 @@ function countGuard(stats: SpeechGuardStats, decision: SpeechGuardDecision): voi
   aggregateGuardStats.lastReject = decision.reject;
 }
 
+function defaultNow(): number {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+// ---------------------------------------------------------------- 朗读相位（我们自己的状态）
+
 /**
- * 默认探针：`speechSynthesis.speaking` 的**边沿**检测。
- * 浏览器不给「这句从何时开始」的时间戳，所以由探针自己在每次调用时记录上升沿时刻。
- * 说话中多句之间的瞬时 `speaking=false` 会让禁声期重新计时 —— 方向是更保守，可接受。
+ * 我们自己的「角色正在出声」相位 —— 回声守卫的**唯一**判定依据。
+ *
+ * 为什么不直接信 `speechSynthesis.speaking`：Chrome 实测在 `cancel()` 之后还会让这个标志
+ * 保持 true 100–300ms。用户按下 Esc / 点了打断键之后立刻接话，这段滞后期里的开口会被守卫
+ * 当成「角色还在说话」而按回声丢弃 —— 用户那句「停一下」就整句没了（实测复现见
+ * tests/web/manualInterruptGuard.test.ts）。
+ *
+ * 相位有两个来源，且我们自己的判断优先：
+ *   · 浏览器标志的**上升沿**（角色真的开始出声）→ 开相位，起点时间由我们自己记录
+ *     （浏览器不给「这句从何时开始」的时间戳）；
+ *   · **人工打断**（按钮 / Esc / 打字 / VAD 打断）→ 立刻关相位，不等标志回落。
+ *
+ * 关相位后的边界：要等到标志真的回落（看到一次 false）才算干净，之后的新上升沿才是角色
+ * 真的又开口了。否则滞后的 true 会被误当成「新一句的起点」，守卫提前恢复、继续吞话。
+ *
+ * 权衡：若浏览器标志永远不回落，守卫就一直解除。宁可不拦这一次回声（最坏是角色被自己的
+ * 声音误打断），也不吞用户的话 —— 两个方向的失败代价不对称。
  */
-export function createBrowserTtsSpeakingProbe(clock: () => number = defaultNow): SpeakingProbe {
+export interface SpeechPhaseTracker {
+  /** 喂一次观测，返回「按我们自己的判断，角色是否在出声、从何时开始」 */
+  observe(now: number): SpeakingSnapshot;
+  /** 人工打断 / TTS cancel：立刻结束相位（守卫从下一帧起解除） */
+  markSilent(): void;
+  readonly speaking: boolean;
+}
+
+export interface SpeechPhaseTrackerOptions {
+  /** 浏览器标志读取器，默认读 `speechSynthesis.speaking` */
+  readBrowserSpeaking?: () => boolean;
+}
+
+export function createSpeechPhaseTracker(
+  options: SpeechPhaseTrackerOptions = {},
+): SpeechPhaseTracker {
+  const read = options.readBrowserSpeaking ?? readBrowserSpeakingFlag;
+  let speaking = false;
   let startedAt: number | null = null;
-  return () => {
-    const active =
-      typeof window !== "undefined" &&
-      typeof window.speechSynthesis !== "undefined" &&
-      Boolean((window.speechSynthesis as SpeechSynthesis | undefined)?.speaking);
-    if (!active) {
+  /** 人工打断之后为 true：在看到浏览器标志真正回落之前，不再把 true 当成朗读相位 */
+  let awaitingFalloff = false;
+
+  return {
+    get speaking() {
+      return speaking;
+    },
+    observe(now: number) {
+      if (!read()) {
+        // 浏览器说「停了」→ 结束相位。这里的滞后只会让守卫少拦一会儿，方向安全。
+        speaking = false;
+        startedAt = null;
+        awaitingFalloff = false;
+        return { speaking: false, sinceSpeechStartMs: null };
+      }
+      if (!speaking) {
+        // 人工打断后的滞后 true：那是上一次朗读的残影，不是新的朗读相位
+        if (awaitingFalloff) return { speaking: false, sinceSpeechStartMs: null };
+        speaking = true;
+        startedAt = now;
+      }
+      const since = startedAt === null ? 0 : Math.max(0, now - startedAt);
+      return { speaking: true, sinceSpeechStartMs: since };
+    },
+    markSilent() {
+      speaking = false;
       startedAt = null;
-      return { speaking: false, sinceSpeechStartMs: null };
-    }
-    const now = clock();
-    if (startedAt === null) startedAt = now;
-    return { speaking: true, sinceSpeechStartMs: now - startedAt };
+      awaitingFalloff = true;
+    },
   };
 }
 
-function defaultNow(): number {
-  return typeof performance !== "undefined" ? performance.now() : Date.now();
+function readBrowserSpeakingFlag(): boolean {
+  try {
+    return (
+      typeof window !== "undefined" &&
+      typeof window.speechSynthesis !== "undefined" &&
+      Boolean(window.speechSynthesis?.speaking)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** 模块级相位：VAD 与（将来的）TTS 接线共用同一份判断 */
+let speechPhase = createSpeechPhaseTracker();
+
+/** 默认探针：相位来自我们自己的跟踪器，而不是裸的浏览器标志 */
+export function createSpeakingPhaseProbe(clock: () => number = defaultNow): SpeakingProbe {
+  return () => speechPhase.observe(clock());
+}
+
+/**
+ * 人工打断（按钮 / Esc / 打字 / 任何「用户明确要求角色闭嘴」的入口）→ 立刻解除回声守卫，
+ * 不等 `speechSynthesis.speaking` 回落。挂上 cancel 钩子后这些入口无需各自调用
+ * （见 installSpeechSynthesisCancelWatch），显式调用留作钳制点与测试入口。
+ */
+export function noteManualSpeechInterrupt(): void {
+  speechPhase.markSilent();
+}
+
+/** 仅供测试复位 */
+export function resetSpeechPhase(): void {
+  speechPhase = createSpeechPhaseTracker();
+}
+
+// ---------------------------------------------------------------- 回声源（cancel）订阅
+
+/**
+ * 订阅 `speechSynthesis.cancel()` —— 「我们自己把角色闭麦」的唯一可靠信号。
+ *
+ * BrowserTTS.stop()、performBargeIn 的 cancelAudio()、以及按钮 / Esc / 打字触发的打断，
+ * 最终都会走到 cancel()。在这里挂一次钩子，就等于在人工打断那一刻拿到通知：
+ * 不用改 App / tts 的调用点，也不用等浏览器标志回落。
+ *
+ * 引用计数：麦克风可能被反复 start/stop（每次开麦都换一个 VAD 实例）。
+ */
+let cancelWatchCount = 0;
+let restoreCancel: (() => void) | null = null;
+
+export function installSpeechSynthesisCancelWatch(): () => void {
+  if (typeof window === "undefined" || typeof window.speechSynthesis === "undefined") {
+    return () => {};
+  }
+  if (cancelWatchCount === 0) {
+    const synth = window.speechSynthesis;
+    const original = synth.cancel;
+    try {
+      synth.cancel = function patchedCancel(this: SpeechSynthesis) {
+        // 先解守卫再真的取消：守卫的解除不能依赖 cancel 本身是否成功
+        noteManualSpeechInterrupt();
+        original.call(this);
+      };
+      restoreCancel = () => {
+        synth.cancel = original;
+      };
+    } catch {
+      // 只读环境（冻结对象）：退化为靠显式 noteManualSpeechInterrupt() 接线，不影响 VAD 本身
+      restoreCancel = null;
+    }
+  }
+  cancelWatchCount += 1;
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    cancelWatchCount -= 1;
+    if (cancelWatchCount > 0) return;
+    restoreCancel?.();
+    restoreCancel = null;
+  };
 }
 
 // ---------------------------------------------------------------- 触发闸门
@@ -165,7 +302,7 @@ export class SpeechTriggerGate {
     this.holdMs = options.holdMs ?? 120;
     this.cooldownMs = options.cooldownMs ?? 900;
     this.echoGuard = { ...DEFAULT_ECHO_GUARD, ...options.echoGuard };
-    this.speakingProbe = options.speakingProbe ?? createBrowserTtsSpeakingProbe();
+    this.speakingProbe = options.speakingProbe ?? createSpeakingPhaseProbe();
     this.onGuarded = options.onGuarded;
   }
 
@@ -252,6 +389,7 @@ export class MicEnergyVad implements VadController {
   private data: Uint8Array<ArrayBuffer> | null = null;
   private raf: number | null = null;
   private active = false;
+  private detachCancelWatch: (() => void) | null = null;
 
   constructor(options: VadOptions = {}) {
     this.options = options;
@@ -305,6 +443,8 @@ export class MicEnergyVad implements VadController {
       this.analyser = analyser;
       this.data = new Uint8Array(new ArrayBuffer(analyser.fftSize));
       this.active = true;
+      // 开麦期间盯住 speechSynthesis.cancel()：人工打断那一刻立刻解除回声守卫
+      this.detachCancelWatch = installSpeechSynthesisCancelWatch();
       this.loop();
       return true;
     } catch (err) {
@@ -316,6 +456,8 @@ export class MicEnergyVad implements VadController {
 
   stop(): void {
     this.active = false;
+    this.detachCancelWatch?.();
+    this.detachCancelWatch = null;
     if (this.raf !== null && typeof cancelAnimationFrame === "function") {
       cancelAnimationFrame(this.raf);
     }

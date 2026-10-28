@@ -1,0 +1,122 @@
+/* =============================================================================
+   Mira · 生成式插图层（由 IllustrationLayer 渲染）
+   -----------------------------------------------------------------------------
+   层级：角色(z auto) < .cue-root(z 2) < .clip-layer(z 3) < .illustration-layer(z 4)
+         < .stage-ui(z 5 字幕/输入)
+   原则：图铺满整幅（cover），但整层 pointer-events: none —— 生成期间也不拦对话与输入。
+        淡出由 CSS 承担（3.52s 起 0.48s 收），控制器只负责 4s 到点卸载。
+   ========================================================================== */
+
+.illustration-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  isolation: isolate;
+}
+
+/* 图与角色之间留一条很薄的压暗过渡，避免硬切；不做全屏蒙版（会压死角色） */
+.illustration-layer[data-phase="showing"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(120% 60% at 50% 50%, rgba(4, 7, 12, 0) 46%, rgba(4, 7, 12, 0.42) 84%, rgba(4, 7, 12, 0.6) 100%);
+}
+
+.illustration-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #04070c;
+  /* 入场淡入 420ms；3.52s 开始淡出 480ms —— 合计 4s，与控制器 holdMs 对齐 */
+  animation:
+    illusIn 420ms ease-out both,
+    illusOut 480ms ease-in 3520ms both;
+}
+
+/* 生成中的轻提示：一行胶囊，顶部居中，不遮角色、不拦点击 */
+.illustration-hint {
+  position: absolute;
+  top: 16%;
+  left: 50%;
+  margin: 0;
+  padding: 6px 14px;
+  translate: -50% 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(6, 10, 17, 0.72);
+  backdrop-filter: blur(8px);
+  color: rgba(242, 238, 233, 0.88);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  animation: illusPulse 1.1s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes illusIn {
+  from {
+    opacity: 0;
+    scale: 1.02;
+  }
+  to {
+    opacity: 1;
+    scale: 1;
+  }
+}
+
+@keyframes illusOut {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes illusPulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.95;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .illustration-image {
+    animation: none;
+  }
+  .illustration-hint {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------------ 诊断区
+   插图的失败/未配置只在这里留一行；未配置与配额用 info（不染色），
+   只有真正的上游失败（tone="error"）才红标 —— 与片段那套视觉区分开。
+*/
+
+.mira-diag__illus {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 3px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: rgba(242, 238, 233, 0.62);
+}
+
+.mira-diag__illus li[data-tone="error"] {
+  color: #ffb3a8;
+}
+
+.mira-diag__illus li[data-tone="warn"] {
+  color: rgba(255, 214, 160, 0.9);
+}

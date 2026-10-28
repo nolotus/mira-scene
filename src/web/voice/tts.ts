@@ -580,3 +580,225 @@ export function createTts(
     ? new StreamTTS({ lang: options.lang })
     : new BrowserTTS({ lang: options.lang, onSegment: options.onSegment });
 }
+
+// ================================================================== Provider 选择
+
+/**
+ * CJK 判据（客户端这一份；服务端 `src/server/tts.ts` 里有一模一样的另一份）。
+ * 两处属于 server / web 两个独立构建，不允许跨端 import，所以有意的写两遍、两边各钉单测。
+ */
+const CLIENT_CJK = /[\u2E80-\u2EFF\u3000-\u303F\u3040-\u30FF\u3100-\u312F\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/;
+
+export function containsCjk(text: string): boolean {
+  return CLIENT_CJK.test(text);
+}
+
+export type VoiceTtsTier = "deepgram" | "browser";
+
+/**
+ * 分句级的 Provider 选择。判据只有两条，顺序不能换：
+ *   1. 含 CJK → **永远** 浏览器（Aura 只有英语，中文合成出来是废音 —— 服务端也会 400 拦一遍）
+ *   2. 纯英文且 status 说 tts 可用 → Deepgram
+ * 其余（未配置 / status 还没到 / 空串）→ 浏览器。默认永远是可用的那一条。
+ */
+export function selectTtsChannel(
+  text: string,
+  status: { tts: boolean } | null | undefined,
+): VoiceTtsTier {
+  if (!text.trim()) return "browser";
+  if (containsCjk(text)) return "browser";
+  return status?.tts === true ? "deepgram" : "browser";
+}
+
+/** MP3 字节 → base64（塞进既有的 audio.chunk 通道，复用 StreamTTS 的解码/排队） */
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const block = 0x8000;
+  for (let i = 0; i < bytes.length; i += block) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + block));
+  }
+  return btoa(binary);
+}
+
+export type SpeakRequestResult =
+  | { ok: true; bytes: ArrayBuffer }
+  | { ok: false; reason: string };
+
+export type SpeakRequest = (text: string) => Promise<SpeakRequestResult>;
+
+/** 默认实现：POST /api/tts 拿 MP3。失败只回 reason（服务端的 400/502 原因码）。 */
+export function createSpeakRequest(fetcher: typeof fetch = fetch): SpeakRequest {
+  return async (text) => {
+    try {
+      const res = await fetcher("/api/tts", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        let reason = `status-${res.status}`;
+        try {
+          const body = (await res.json()) as { reason?: unknown };
+          if (typeof body?.reason === "string") reason = body.reason;
+        } catch {
+          /* 非 JSON 响应：保留状态码即可 */
+        }
+        return { ok: false, reason };
+      }
+      return { ok: true, bytes: await res.arrayBuffer() };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : "network" };
+    }
+  };
+}
+
+export interface RoutedTtsOptions {
+  lang?: string;
+  onSegment?: (text: string) => void;
+  /** 每个分句现查一次：status 可能比第一句话更晚到 */
+  getStatus?: () => { tts: boolean } | null;
+  speakRequest?: SpeakRequest;
+}
+
+/**
+ * 按分句选 Provider 的 TTS：
+ *   · 中文 / status 不可用 → BrowserTTS（行为与改造前完全一致）
+ *   · 纯英文且可用 → POST /api/tts → MP3 字节包成 audio.chunk → StreamTTS（既有播放路径）
+ * 两条路都遵守同一条铁律：`cancel()` 之后，迟到的 fetch / 迟到的解码一律不许出声（代际令牌）。
+ */
+export class RoutedTTS implements TTSProvider {
+  private browser: BrowserTTS | null = null;
+  private stream: StreamTTS | null = null;
+  private buffer = "";
+  private generation = 0;
+  private seq = 0;
+  private inflight = 0;
+  private lastErrorValue: string | null = null;
+  private readonly lang: string;
+  private readonly onSegment: ((text: string) => void) | null;
+  private readonly getStatus: () => { tts: boolean } | null;
+  private readonly speakRequest: SpeakRequest;
+
+  constructor(options: RoutedTtsOptions = {}) {
+    this.lang = options.lang ?? "zh-CN";
+    this.onSegment = options.onSegment ?? null;
+    this.getStatus = options.getStatus ?? (() => null);
+    this.speakRequest = options.speakRequest ?? createSpeakRequest();
+  }
+
+  get name(): string {
+    return this.getStatus()?.tts === true ? "deepgram+browser" : "browser";
+  }
+
+  /** 最近一次 Deepgram 合成失败的原因（UI/诊断可读；内容不含凭据） */
+  get lastError(): string | null {
+    return this.lastErrorValue;
+  }
+
+  get isSpeaking(): boolean {
+    return (
+      (this.browser?.isSpeaking ?? false) ||
+      (this.stream?.isSpeaking ?? false) ||
+      this.inflight > 0
+    );
+  }
+
+  /** 必须在用户手势里调一次：StreamTTS 的 AudioContext 不能在后台悄悄创建 */
+  warmUp(): void {
+    if (this.getStatus()?.tts !== true) return;
+    this.ensureStream().warmUp();
+  }
+
+  speak(text: string): void {
+    if (!text) return;
+    this.buffer += text;
+    const { segments, rest } = splitSpeech(this.buffer);
+    this.buffer = rest;
+    for (const segment of segments) this.dispatch(segment);
+  }
+
+  flush(): void {
+    if (this.buffer.trim()) {
+      const { segments } = splitSpeech(this.buffer, { flush: true });
+      this.buffer = "";
+      for (const segment of segments) this.dispatch(segment);
+    }
+    // 浏览器那一路自己攒着残句；Deepgram 那一路按整句请求，不需要 flush
+    this.browser?.flush();
+  }
+
+  cancel(): void {
+    this.generation += 1;
+    this.buffer = "";
+    this.inflight = 0;
+    this.browser?.cancel();
+    this.stream?.cancel();
+  }
+
+  dispose(): void {
+    this.cancel();
+    this.browser?.dispose();
+    this.stream?.dispose();
+    this.browser = null;
+    this.stream = null;
+  }
+
+  // ------------------------------------------------------------ 内部
+
+  private dispatch(segment: string): void {
+    if (selectTtsChannel(segment, this.getStatus()) === "browser") {
+      this.ensureBrowser().speak(segment);
+      return;
+    }
+    void this.playDeepgram(segment);
+  }
+
+  private async playDeepgram(segment: string): Promise<void> {
+    const generation = this.generation;
+    this.inflight += 1;
+    let result: SpeakRequestResult;
+    try {
+      result = await this.speakRequest(segment);
+    } finally {
+      this.inflight = Math.max(0, this.inflight - 1);
+    }
+    // 打断之后回来的音频：解码了也不许响
+    if (generation !== this.generation) return;
+    if (!result.ok) {
+      // 服务端说「不支持」（400）或上游失败（502）→ 浏览器兜住，宁可换个嗓子也不静音
+      this.lastErrorValue = `deepgram tts: ${result.reason}`;
+      this.ensureBrowser().speak(segment);
+      return;
+    }
+    this.seq += 1;
+    this.ensureStream().pushChunk({
+      seq: this.seq,
+      dataUrl: `data:audio/mpeg;base64,${arrayBufferToBase64(result.bytes)}`,
+      mime: "audio/mpeg",
+    });
+  }
+
+  private ensureBrowser(): BrowserTTS {
+    if (!this.browser) {
+      this.browser = new BrowserTTS({ lang: this.lang, onSegment: this.onSegment ?? undefined });
+    }
+    return this.browser;
+  }
+
+  private ensureStream(): StreamTTS {
+    if (!this.stream) {
+      // 只是被当播放器用（分片已由我们灌入），所以关掉它自己的字幕回退，避免双重声音
+      this.stream = new StreamTTS({ lang: this.lang, fallbackToBrowser: false });
+    }
+    return this.stream;
+  }
+}
+
+export function createVoiceTts(
+  options: RoutedTtsOptions & { mode?: AudioMode } = {},
+): TTSProvider & Partial<AudioChunkSink> & { warmUp(): void } {
+  // `?audio=stream` 是既有的实验开关，行为保持不变（不套路由层）
+  if (options.mode === "stream") return new StreamTTS({ lang: options.lang });
+  return new RoutedTTS(options);
+}

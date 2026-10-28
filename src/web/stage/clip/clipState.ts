@@ -233,6 +233,70 @@ export function isStormShot(
   );
 }
 
+// ---------------------------------------------------------------- 播放槽 + 触发闸门
+
+/**
+ * 播放槽：一次播放从开始到收尾占用唯一的一个位置。
+ *
+ * 为什么要把「槽」单独做成一台纯状态机：状态机（clipReducer）只管相位，管不了
+ * 「这次播放什么时候算收尾干净」。而组件里那个 `stopRef.current !== null → return`
+ * 的入口判断，本质上就是这台槽机 —— 它以前是散在组件里的一个 ref，没有收尾就再也不释放，
+ * 于是「打断一次 → 本会话永久播不出来」这种只靠读代码才能发现的 bug 无法在纯逻辑层复现。
+ * 挪出来之后，闸门只看三件事：storm 是否命中、槽是否被占、本会话是否已播。
+ */
+export interface ClipSlotState {
+  occupied: boolean;
+}
+
+export const IDLE_SLOT: ClipSlotState = { occupied: false };
+export const RUNNING_SLOT: ClipSlotState = { occupied: true };
+
+/** 一次播放的收尾方式：自然播完 / 失败降级 / 被（会话、用户、新一轮）打断 */
+export type ClipOutcome = "ended" | "failed" | "aborted";
+
+export interface ClipSettle {
+  slot: ClipSlotState;
+  /** 这次收尾是否让片段算「已播」 */
+  played: boolean;
+}
+
+/**
+ * 收尾：释放槽，并决定「算不算已播」。
+ *
+ * 三条收尾（自然播完 / 失败降级 / 被打断）语义完全一致：**释放槽 + 算已播**。
+ *
+ *   · 释放槽：槽是「一次播放占位」，不释放就等于一把永不回收的锁 —— 组件里原来的
+ *     `if (stopRef.current !== null) return` 正是这样，打断一次之后本会话再也进不来
+ *     （连「新会话该不该播」都轮不到判断）。
+ *   · 打断算已播：打断是用户主动要求停止（换 epoch / 按 Esc / 新一轮开始），不是「还没播过」。
+ *     若打断不算已播，用户每次暴雨都会被同一条片段再打断一次，正是要避免的事。
+ *     语义与测试名一起钉住：tests/web/clipSlot.test.ts「打断算已播」。
+ */
+export function settleClipSlot(state: ClipSlotState, outcome: ClipOutcome): ClipSettle {
+  const released = outcome === "ended" || outcome === "failed" || outcome === "aborted";
+  if (!released) return { slot: state, played: false };
+  return { slot: IDLE_SLOT, played: true };
+}
+
+export interface ClipGateInput {
+  /** 这一帧算不算 storm 演出命中 */
+  storm: boolean;
+  /** 上一段播放是否还占着槽（loading / playing 中） */
+  occupied: boolean;
+  /** 本会话内这条片段是否已播过 */
+  played: boolean;
+}
+
+export type ClipGateDecision = "start" | "hold" | "skip";
+
+/** 纯函数：收到一帧 storm，该不该启动播放 */
+export function decideClipStart(input: ClipGateInput): ClipGateDecision {
+  if (!input.storm) return "hold";
+  if (input.occupied) return "hold";
+  if (input.played) return "skip";
+  return "start";
+}
+
 // ---------------------------------------------------------------- 已播集合
 
 export interface PlayedClips {

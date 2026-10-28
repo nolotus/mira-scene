@@ -4,13 +4,11 @@ import { reportSessionSignal } from "./stage/clip/clipBus";
 import { createHttpApi } from "./state/api";
 import { SessionStore } from "./state/store";
 import { useSessionView } from "./state/useSession";
-import { createTts, type AudioMode, type TTSProvider } from "./voice/tts";
-import {
-  createStt,
-  isSpeechRecognitionSupported,
-  type SttController,
-  type SttLang,
-} from "./voice/stt";
+import { createVoiceTts, type AudioMode, type TTSProvider } from "./voice/tts";
+import { isSpeechRecognitionSupported, type SttLang } from "./voice/stt";
+import { createDeepgramStt, type DeepgramSttController, type DeepgramSttDiagnostics } from "./voice/deepgramStt";
+import { fetchVoiceStatus, type VoiceStatus } from "./voice/voiceStatus";
+import { reportVoiceChannel } from "./voice/voiceDiag";
 import { MicEnergyVad } from "./voice/vad";
 import {
   attachRuntimeErrorWatcher,
@@ -75,8 +73,34 @@ export function App() {
   const api = useMemo(() => withDemoApi(httpApi, demo), [httpApi, demo]);
   // 「正在朗读」的句子：BrowserTTS 每句开口时回调，用来证明语音节奏与字幕对齐
   const [speakingSegment, setSpeakingSegment] = useState("");
+  /** 服务端语音能力（无 key → stt/tts 都 false，正常态） */
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
+  const voiceStatusRef = useRef<VoiceStatus | null>(null);
+  useEffect(() => {
+    voiceStatusRef.current = voiceStatus;
+  }, [voiceStatus]);
+  useEffect(() => {
+    let alive = true;
+    // 失败 = 未知 → null（客户端按「都不可用」回退，不报错、不卡住）
+    void fetchVoiceStatus().then((status) => {
+      if (!alive) return;
+      setVoiceStatus(status);
+      reportVoiceChannel({ tts: status?.tts ? "deepgram" : "browser" });
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const nativeTts = useMemo(
-    () => createTts(boot.audio, { lang: boot.lang, onSegment: setSpeakingSegment }),
+    () =>
+      createVoiceTts({
+        mode: boot.audio,
+        lang: boot.lang,
+        onSegment: setSpeakingSegment,
+        // 分句现查：status 可能比第一句话晚到，也可能中途变了
+        getStatus: () => voiceStatusRef.current,
+      }),
     [boot],
   );
   const tts = useMemo(() => withDemoTts(nativeTts, demo), [nativeTts, demo]);
@@ -94,8 +118,13 @@ export function App() {
   // 片段的外部中止源：epoch 变化（用户打断 / 换轮）或新一轮开始 → 立刻停帧并隐藏。
   // 注意不能拿「轮次数」当信号：它在 turn.end 才 +1，会在片段播到一半时误判成打断。
   useEffect(() => {
-    reportSessionSignal(view.machine.epoch, view.machine.turnId ?? null);
-  }, [view.machine.epoch, view.machine.turnId]);
+    // sessionId 一起上报：插图层要用它发请求（Stage 的 props 已冻结，只能走这条窄通道）
+    reportSessionSignal(
+      view.machine.epoch,
+      view.machine.turnId ?? null,
+      view.session?.sessionId ?? null,
+    );
+  }, [view.machine.epoch, view.machine.turnId, view.session?.sessionId]);
 
   const [interim, setInterim] = useState("");
   const [note, setNote] = useState<string | null>(null);
@@ -105,11 +134,15 @@ export function App() {
   /** 麦克风通了但语音识别服务没响应（与「权限被拒」是两件事，文案必须分开） */
   const [sttBlocked, setSttBlocked] = useState(false);
 
-  const sttRef = useRef<SttController | null>(null);
+  const sttRef = useRef<DeepgramSttController | null>(null);
   const vadRef = useRef<MicEnergyVad | null>(null);
   const micOnRef = useRef(false);
 
-  const speechSupported = useMemo(() => isSpeechRecognitionSupported(), []);
+  // 有任一可用 STT 路径就算「可用」：Deepgram 走服务端代理，不依赖 Web Speech
+  const speechSupported = useMemo(
+    () => isSpeechRecognitionSupported() || voiceStatus?.stt === true,
+    [voiceStatus],
+  );
   const secureContext = useMemo(
     () => readSecureContext(typeof window === "undefined" ? undefined : window),
     [],
@@ -193,10 +226,20 @@ export function App() {
   // ---------------------------------------------------------------- 语音识别
 
   useEffect(() => {
-    const stt = createStt({
+    const stt = createDeepgramStt({
       lang: boot.lang,
       continuous: true,
       interim: true,
+      // status 说 false 就不建连（省一次必然失败的升级）；状态晚到也没关系：每次现查
+      available: () => voiceStatusRef.current?.stt !== false,
+      // 下面两个回调是「用 speech_started 替代能量 VAD 做打断」的接入点。
+      // 本轮只留口子不接线：接法是 onSpeechStarted 里判 canInterrupt 后 store.onUserSpeech("speech")，
+      // 详见报告（需要对 vad.ts 的 SpeechTriggerGate 做同一条防抖）。
+      onSpeechStarted: () => {},
+      onSpeechFinal: () => {},
+      onDiagnostic: (diagnostics: DeepgramSttDiagnostics) => {
+        reportVoiceChannel({ stt: diagnostics.channel, reason: diagnostics.reason });
+      },
       onTranscript: ({ text, final }) => {
         if (!final) {
           setInterim(text);
@@ -294,6 +337,9 @@ export function App() {
     micOnRef.current = true;
     setSttBlocked(false);
     store.setMic("listening");
+
+    // 麦克风一开就预热：建连实测约 1s，等用户开口才连必然丢第一句
+    sttRef.current?.prewarm();
 
     if (sttRef.current?.supported) {
       sttRef.current.start();

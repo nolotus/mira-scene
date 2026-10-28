@@ -22,6 +22,8 @@ import { createPlayedClips } from "./clipState";
 export interface SessionSignal {
   epoch: number;
   turnId: string | null;
+  /** 会话 id：插图层要用它发 POST /api/illustrate（Stage 的 props 已冻结，只能走这条窄通道） */
+  sessionId: string | null;
 }
 
 let signal: SessionSignal | null = null;
@@ -37,9 +39,13 @@ const signalListeners = new Set<(reason: "epoch" | "turn") => void>();
  * 本轮结束（turnId 变 null）不是打断，片段该播完就播完。
  * 首个快照只用来定基线（挂载时不该被当成「变化」而中止任何东西）。
  */
-export function reportSessionSignal(epoch: number, turnId: string | null): void {
+export function reportSessionSignal(
+  epoch: number,
+  turnId: string | null,
+  sessionId: string | null = null,
+): void {
   const previous = signal;
-  signal = { epoch, turnId };
+  signal = { epoch, turnId, sessionId };
   if (previous === null) return;
   if (previous.epoch === epoch && previous.turnId === turnId) return;
 
@@ -69,6 +75,39 @@ export function subscribeSessionSignal(
 /** 仅供测试/演示复位（不改变运行时语义） */
 export function resetSessionSignal(): void {
   signal = null;
+}
+
+// ---------------------------------------------------------------- 片段相位（插图用）
+
+let clipPhase: ClipPhase = "idle";
+const phaseListeners = new Set<(phase: ClipPhase) => void>();
+
+/**
+ * 片段把自己的相位广播出去 —— **单向、只读**。
+ * 插图层据此判断「片段让出画面了吗」，反过来永远不驱动片段：
+ * 「片段先播、插图后上」的秩序只能从片段流向插图，不能倒过来。
+ */
+export function reportClipPhase(phase: ClipPhase): void {
+  if (clipPhase === phase) return;
+  clipPhase = phase;
+  for (const listener of [...phaseListeners]) listener(phase);
+}
+
+export function getClipPhase(): ClipPhase {
+  return clipPhase;
+}
+
+export function subscribeClipPhase(listener: (phase: ClipPhase) => void): () => void {
+  phaseListeners.add(listener);
+  return () => {
+    phaseListeners.delete(listener);
+  };
+}
+
+/** 仅供测试/演示复位 */
+export function resetClipPhase(): void {
+  clipPhase = "idle";
+  phaseListeners.clear();
 }
 
 // ---------------------------------------------------------------- 外部中止入口

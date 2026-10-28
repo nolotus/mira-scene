@@ -22,8 +22,24 @@ import type { Director, DirectorInput, SceneSnapshot, SessionEvent, SessionInfo,
 import { loadConfig, type ServerConfig } from "./config.ts";
 import { createDirector } from "./director/index.ts";
 import { resolveDirectorMode, type DirectorAvailability, type DirectorResolution } from "./director/resolve.ts";
+import { createIllustrationService, type IllustrationService } from "./illustrate.ts";
 import { isEmotion, isPose, isSceneVariant, validateDirective } from "./scene/validate.ts";
 import { SessionStore, TurnRegistry } from "./sessions.ts";
+import {
+  STT_MODEL,
+  createSttBridge,
+  type SttAudioFormat,
+  type SttBridge,
+  type UpstreamConnect,
+} from "./stt.ts";
+import { createTtsProxy, type TtsProxy } from "./tts.ts";
+
+/** /api/voice/status 的响应体（无 key 时两个 false 是正常态，不是错误） */
+export interface VoiceStatus {
+  stt: boolean;
+  tts: boolean;
+  sttModel: string;
+}
 
 export interface AppOptions {
   config?: ServerConfig;
@@ -32,6 +48,12 @@ export interface AppOptions {
   /** 按档位造导演（测试用：想在 live / mock 下拿到不同的假导演） */
   directorFactory?: (mode: DirectorMode) => Director;
   sessions?: SessionStore;
+  /** 生成式插图服务（测试注入 stub fetch / 配额；默认按 process.env 现场创建） */
+  illustrate?: IllustrationService;
+  /** 语音合成代理（测试注入 stub fetch / 假配置；默认按 config.deepgram 现场创建） */
+  tts?: TtsProxy;
+  /** 上游 STT 建连函数（测试注入假 socket；默认连 wss://api.deepgram.com） */
+  sttConnect?: UpstreamConnect;
 }
 
 export interface App {
@@ -41,6 +63,20 @@ export interface App {
   readonly director: Director;
   readonly sessions: SessionStore;
   readonly turns: TurnRegistry;
+  /** 生成式插图（配额/缓存都在它里面；环境没配时它只会回 not-configured） */
+  readonly illustrate: IllustrationService;
+  /** 语音合成代理（含 CJK 拦截；环境没配 key 时只会回 not-configured） */
+  readonly tts: TtsProxy;
+  /** /api/voice/status 的值（真实反映 env） */
+  readonly voice: VoiceStatus;
+  /**
+   * 开一条 STT 桥：WS `/api/stt` 升级成功后由 index.ts 调。
+   * 没配 key 时回 null（调用方应回 503 + 明确的 reason，不要静默失败）。
+   */
+  openSttStream(sink: {
+    sendText(payload: string): void;
+    close(code?: number, reason?: string): void;
+  }, options?: { lang?: "zh-CN" | "en-US"; format?: SttAudioFormat }): SttBridge | null;
   /** 档位 → 导演实例（同档位复用同一个实例） */
   directorFor(mode: DirectorMode): Director;
 }
@@ -74,6 +110,41 @@ export function createApp(options: AppOptions = {}): App {
   const config = options.config ?? loadConfig();
   const sessions = options.sessions ?? new SessionStore();
   const turns = new TurnRegistry();
+  // 插图服务：会话表共用同一个实例，所以「会话必须已存在」用的是真实会话，
+  // 而不是一张按需创建的影子表。env 没配时它只会回 not-configured（正常状态）。
+  const illustrate = options.illustrate ?? createIllustrationService({ sessions });
+
+  // 语音：STT 与 TTS 共用同一个 Deepgram key。没配 key 时两者都「不可用」，
+  // 但这是正常态 —— 文字通道与 Mock 导演完全不受影响。
+  const deepgram = config.deepgram;
+  const tts =
+    options.tts ??
+    createTtsProxy({
+      config: deepgram ? { apiKey: deepgram.apiKey } : null,
+      // 上游日志由 index.ts 打开；测试里注入的 log 会盖掉默认的 console.warn
+      log: () => {},
+    });
+  const voice: VoiceStatus = { stt: deepgram !== null, tts: tts.configured, sttModel: STT_MODEL };
+
+  const sttConnect: UpstreamConnect =
+    options.sttConnect ??
+    ((url, headers) => {
+      // Bun 的全局 WebSocket 支持第二参数带 header（浏览器不支持 —— 这是服务端代码）。
+      // 结构上它就是 UpstreamSocket：send/close/onopen/onmessage/onclose/onerror。
+      const socket = new WebSocket(url, { headers } as never);
+      return socket as unknown as ReturnType<UpstreamConnect>;
+    });
+
+  const openSttStream: App["openSttStream"] = (sink, opts) => {
+    if (!deepgram) return null;
+    return createSttBridge({
+      config: deepgram,
+      connect: sttConnect,
+      sink,
+      lang: opts?.lang,
+      format: opts?.format,
+    });
+  };
 
   /** 「回落」判断的输入：环境想要什么 + 有没有可用真模型（不含任何密钥内容） */
   const availability: DirectorAvailability = {
@@ -139,6 +210,30 @@ export function createApp(options: AppOptions = {}): App {
       return json({ ok: true }, 200, origin);
     }
 
+    // 语音通道能力：只暴露「有没有」，绝不暴露 key 的任何痕迹。
+    // 没有 DEEPGRAM_API_KEY 时 stt/tts 都是 false —— 这是正常态，不是错误码。
+    if (path === "/api/voice/status") {
+      if (request.method !== "GET") return json({ error: "method not allowed" }, 405, origin);
+      return json(voice, 200, origin);
+    }
+
+    // 语音合成：成功直接回 MP3 字节（客户端塞进 StreamTTS 的播放路径）；
+    // 失败回 { reason }，客户端据此回退 BrowserTTS（不会让用户听到废音）。
+    if (path === "/api/tts") {
+      if (request.method !== "POST") return json({ error: "method not allowed" }, 405, origin);
+      const result = await tts.synthesize(await safeJson(request));
+      if (!result.ok) return json({ reason: result.reason }, result.status, origin);
+      return new Response(result.bytes.slice().buffer, {
+        status: 200,
+        headers: {
+          "content-type": result.mime,
+          "content-length": String(result.bytes.byteLength),
+          "cache-control": "no-store",
+          ...corsFor(origin),
+        },
+      });
+    }
+
     if (path === "/api/session") {
       if (request.method !== "POST") return json({ error: "method not allowed" }, 405, origin);
       const body = (await safeJson(request)) as { sessionId?: unknown; director?: unknown } | null;
@@ -180,6 +275,14 @@ export function createApp(options: AppOptions = {}): App {
       // 本轮用哪个导演：只认会话里记下的那份（URL/env 在这一步一律不读）
       const record = sessions.ensure(parsed.value.sessionId, defaultChoice());
       return streamTurn(parsed.value, origin, directorFor(record.director.mode));
+    }
+
+    if (path === "/api/illustrate") {
+      if (request.method !== "POST") return json({ error: "method not allowed" }, 405, origin);
+      // 生成式插图：失败/未配置/超配额一律 200 + { ok:false, reason }，
+      // 客户端据此静默回落（不给失败样式），所以这里刻意不用 4xx/5xx 表达业务状态。
+      const result = await illustrate.illustrate(await safeJson(request));
+      return json(result, 200, origin);
     }
 
     const sessionMatch = /^\/api\/session\/([^/]+)$/.exec(path);
@@ -345,7 +448,7 @@ export function createApp(options: AppOptions = {}): App {
     });
   }
 
-  return { fetch: handleFetch, config, director, sessions, turns, directorFor };
+  return { fetch: handleFetch, config, director, sessions, turns, illustrate, tts, voice, openSttStream, directorFor };
 }
 
 // ------------------------------------------------------------------ 请求解析
@@ -412,4 +515,17 @@ async function safeJson(request: Request): Promise<unknown> {
   } catch {
     return null;
   }
+}
+
+/**
+ * WS `/api/stt` 升级前的门禁。
+ * 没配 Deepgram → 503 + 明确的 reason（客户端据此走 Web Speech / 纯文字回退），
+ * 而不是先接受连接再让客户端干等字幕。返回 null 表示可以升级。
+ */
+export function sttUpgradeGate(voice: VoiceStatus): Response | null {
+  if (voice.stt) return null;
+  return new Response(JSON.stringify({ type: "error", reason: "not-configured" }), {
+    status: 503,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }
