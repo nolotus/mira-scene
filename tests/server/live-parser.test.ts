@@ -3,7 +3,51 @@
  * 这部分最容易出隐蔽 bug（半截转义、半截 token、模型加围栏），所以单独测。
  */
 import { describe, expect, test } from "bun:test";
-import { SayExtractor, parseDirectorPayload, splitReady } from "../../src/server/director/live.ts";
+import {
+  LiveDirector,
+  SayExtractor,
+  parseDirectorPayload,
+  splitReady,
+} from "../../src/server/director/live.ts";
+import type { DirectorInput, SessionEvent } from "../../src/shared/protocol.ts";
+
+const FAKE_KEY = "sk-test";
+
+const liveInput: DirectorInput = {
+  userText: "外面还在下雨吗？",
+  scene: { scene: "cafe_night", emotion: "neutral", pose: "stand", playedBeats: [] },
+  history: [],
+  turnId: "turn-dirty",
+  epoch: 1,
+};
+
+/** 把若干增量包成 OpenAI 兼容的 SSE 流（不联网） */
+function sseResponse(chunks: string[]): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: chunk } }] })}\n\n`),
+        );
+      }
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  });
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+/** 2026-10-28 线上实况原文：lithosai 上的 DeepSeek-V4.1-Flash 没守住 json_object，
+ *  say 漏写结束引号、directives 用单引号，结果指令原文被当台词播了出去。 */
+const DIRTY_LIVE_OUTPUT =
+  `{"say": "哦，听错了。这雨声太吵。! 'directives': [{'kind':'emotion','emotion':'curious'}]}`;
+
+/** 新格式（cues 在前或后、字段名变了）下同样的违约：say 漏结束引号，尾巴接着写 cues 数组。
+ *  这条守住的是「护栏只认旧字段名 directives」的漏洞。 */
+const DIRTY_CUES_OUTPUT =
+  `{"say": "哦，听错了。这雨声太吵。! , "cues": [{"a":12,"d":{"kind":"emotion","emotion":"curious"}}]}`;
+
 
 describe("parseDirectorPayload", () => {
   test("标准形状：say + directives", () => {
@@ -104,3 +148,103 @@ describe("splitReady", () => {
     expect(result.rest).toBe("嗯");
   });
 });
+
+describe("SayExtractor · 模型违约时的护栏", () => {
+  test("漏写结束引号 + 单引号 directives：只吐台词，不夹带指令原文", () => {
+    const extractor = new SayExtractor();
+    let text = "";
+    for (const chunk of DIRTY_LIVE_OUTPUT.match(/[\s\S]{1,5}/g) ?? [DIRTY_LIVE_OUTPUT]) {
+      text += extractor.push(chunk);
+    }
+    // 尾部写坏的引号被回退，指令原文一个字都不进台词
+    expect(text).toBe("哦，听错了。这雨声太吵。!");
+    expect(text).not.toContain("directives");
+    expect(extractor.done).toBe(true);
+    expect(parseDirectorPayload(DIRTY_LIVE_OUTPUT)).toBeNull();
+  });
+
+  test("遇到对象收尾就停，不把尾随文字当台词", () => {
+    const extractor = new SayExtractor();
+    expect(extractor.push('{"say":"嗯，雨停了}外面有人喊"')).toBe("嗯，雨停了");
+    expect(extractor.done).toBe(true);
+  });
+
+  test("结构性字段名跨 chunk 被切断时也要停住", () => {
+    const extractor = new SayExtractor();
+    let text = extractor.push('{"say":"嗯。\'direc');
+    text += extractor.push("tives': []}");
+    expect(text).toBe("嗯。");
+    expect(extractor.done).toBe(true);
+  });
+
+  test("模型不守长度时在 180 字处硬截断", () => {
+    const extractor = new SayExtractor();
+    const out = extractor.push(`{"say":"${"雨".repeat(300)}`);
+    expect(Array.from(out).length).toBe(180);
+    expect(extractor.done).toBe(true);
+  });
+
+  test("新格式的 cues 字段同样是结构性标记，不能当台词吐出去", () => {
+    const extractor = new SayExtractor();
+    let text = extractor.push('{"say":"哦，听错了。! , "cu');
+    text += extractor.push('es": [{"a":12,"d":{"kind":"emotion"}}]}');
+    // 尾部 `, "` 被回退，cues 原文一个字都不进台词
+    expect(text).toBe("哦，听错了。!");
+    expect(text).not.toContain("cues");
+    expect(extractor.done).toBe(true);
+  });
+});
+
+describe("LiveDirector · 模型输出违约", () => {
+  test("已经流出的脏台词也算异常：发 recoverable error，台词不含指令原文", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse(DIRTY_LIVE_OUTPUT.match(/[\s\S]{1,8}/g) ?? [DIRTY_LIVE_OUTPUT])) as unknown as typeof fetch;
+    try {
+      const director = new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 });
+      const events: SessionEvent[] = [];
+      for await (const event of director.stream(liveInput, new AbortController().signal)) {
+        events.push(event);
+      }
+
+      const text = events.flatMap((event) => (event.type === "text.delta" ? [event.text] : [])).join("");
+      expect(text).not.toContain("directives");
+      expect(text).toBe("哦，听错了。这雨声太吵。!");
+
+      const errors = events.flatMap((event) => (event.type === "error" ? [event] : []));
+      expect(errors.length).toBe(1);
+      expect(errors[0]?.recoverable).toBe(true);
+      // 不能把脏文本当正常一轮结束：turn 末尾必须是 error 而不是静默收尾
+      expect(events[events.length - 1]?.type).toBe("error");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("新格式 cues 下的违约：台词干净、不重复投递 cues、末尾仍是 error", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse(DIRTY_CUES_OUTPUT.match(/[\s\S]{1,8}/g) ?? [DIRTY_CUES_OUTPUT])) as unknown as typeof fetch;
+    try {
+      const director = new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 });
+      const events: SessionEvent[] = [];
+      for await (const event of director.stream(liveInput, new AbortController().signal)) {
+        events.push(event);
+      }
+
+      const text = events.flatMap((event) => (event.type === "text.delta" ? [event.text] : [])).join("");
+      expect(text).toBe("哦，听错了。这雨声太吵。!");
+      expect(text).not.toContain("cues");
+      // CueScanner 只认 say 之前出现的 cues；这段脏尾巴不能变成 directive 事件
+      expect(events.filter((event) => event.type === "directive").length).toBe(0);
+
+      const errors = events.flatMap((event) => (event.type === "error" ? [event] : []));
+      expect(errors.length).toBe(1);
+      expect(errors[0]?.recoverable).toBe(true);
+      expect(events[events.length - 1]?.type).toBe("error");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+

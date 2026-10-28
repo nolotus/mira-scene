@@ -316,8 +316,15 @@ export class LiveDirector implements Director {
           droppedDirective: Math.max(payload.dropped.directive, scanned.droppedDirective),
           struct: decision,
         };
-      } else if (!emitted) {
-        yield this.#failure(input, "上游返回的内容无法解析为 JSON");
+      } else {
+        // 解析失败时即使已经流了部分文本也要暴露：模型违约（漏引号/单引号 JSON）下
+        // 那部分可能夹带指令原文，静默当正常台词就等于把它交给字幕和 TTS。
+        yield this.#failure(
+          input,
+          emitted
+            ? "上游输出不是合法 JSON：本轮台词可能被截断或夹带指令原文"
+            : "上游返回的内容无法解析为 JSON",
+        );
       }
     } catch (error) {
       if (signal.aborted) return;
@@ -366,6 +373,17 @@ export class LiveDirector implements Director {
 
 const DONE = Symbol("sse-done");
 
+/** 提示词要求 say ≤90 字；模型违约时留一倍余量后强行截断，防止无限吐 */
+const MAX_SAY_CHARS = 180;
+/**
+ * 结构性字段名：模型输出不合法（单引号/漏引号）时用它当停止标记。
+ * 必须覆盖当前提示词用到的每一个字段名——旧格式 `directives`、新格式 `cues`。
+ * 漏一个就等于留一条把指令原文播出去的通道。
+ */
+const STRUCTURAL_WORDS = ["cues", "directives"] as const;
+/** 台词尾部的「可能属于结构化语法」的字符：引号、冒号、逗号、空白 */
+const TRAILING_DIRT = /[\s'"`:,\uFF1A]+$/u;
+
 /** 解析一行 SSE，返回 delta.content；`[DONE]` 返回哨兵；其他返回 null */
 function parseSseContent(line: string): string | typeof DONE | null {
   const trimmed = line.trim();
@@ -396,6 +414,16 @@ export class SayExtractor {
   #start = -1;
   #scan = 0;
   #done = false;
+  /** 已吐出的台词字数：模型违约时用它兜住长度（提示词要求 ≤90 字） */
+  #chars = 0;
+  /** 是否因「结构性字段」而停（停在脏字符上时要回退尾部标点） */
+  #dirtyStop = false;
+  /**
+   * 可能变成脏字符的尾巴，留一片再决定发不发。
+   * 跨 chunk 的情况（`'` 已在上一片发出、下一片才认出 directives）没法撤回，
+   * 所以最后一个字符永远压一拍。
+   */
+  #tail = "";
 
   get done(): boolean {
     return this.#done;
@@ -413,9 +441,30 @@ export class SayExtractor {
       this.#scan = this.#start;
     }
 
-    let out = "";
+    let out = this.#tail;
+    this.#tail = "";
     while (this.#scan < this.#raw.length) {
       const char = this.#raw[this.#scan] ?? "";
+
+      // ---- 护栏：模型不守 JSON 时（漏结束引号、directives 写成单引号），
+      // 绝不能让结构性字段流成台词（2026-10-28 线上 lithosai 代理实况：
+      // 字幕里播出了 `! 'directives': [{'kind':'emotion',...}]}`）。
+      // 见到对象收尾、directives 字段名、或超过长度上限，立刻停。
+      if (char === "}") {
+        this.#dirtyStop = true;
+        this.#done = true;
+        break;
+      }
+      if (this.#atStructuralField()) {
+        this.#dirtyStop = true;
+        this.#done = true;
+        break;
+      }
+      if (this.#chars >= MAX_SAY_CHARS) {
+        this.#dirtyStop = true;
+        this.#done = true;
+        break;
+      }
 
       if (char === "\\") {
         const next = this.#raw[this.#scan + 1];
@@ -440,10 +489,37 @@ export class SayExtractor {
       }
 
       out += char;
+      this.#chars += 1;
       this.#scan += 1;
     }
 
+    // 停在脏字符上时（例如 `! '` 之后才认出 directives），回退尾部 ASCII 标点；
+    // 正常收尾时也要回退——模型常写成 `台词! , "cues": [...]`，
+    // 那个 `, "` 会先于 `cues` 在上一片就被当台词发出去，只能在这里回退。
+    // 中文台词不会以 , : 引号 这类字符结尾，所以不会误伤。
+    // 没停也没结束时压住最后一个字符，等下一片确认它不是脏尾巴。
+    if (this.#dirtyStop || this.#done) {
+      out = out.replace(TRAILING_DIRT, "");
+    } else {
+      const dirt = TRAILING_DIRT.exec(out)?.[0] ?? "";
+      if (dirt) {
+        this.#tail = dirt;
+        out = out.slice(0, out.length - dirt.length);
+      }
+    }
+
     return out;
+  }
+
+  /** 扫描位置是否正对着结构性字段，含跨 chunk 的半截情况（"direc" / "cu"） */
+  #atStructuralField(): boolean {
+    for (const word of STRUCTURAL_WORDS) {
+      const tail = this.#raw.slice(this.#scan, this.#scan + word.length);
+      if (!tail) continue;
+      // 半截前缀先停住等下一片，否则会被当台词吐出去；完整命中直接停
+      if (word.startsWith(tail) || tail.startsWith(word)) return true;
+    }
+    return false;
   }
 }
 
