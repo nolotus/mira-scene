@@ -9,6 +9,7 @@
 > 这是 72 小时 take-home 的实现。设计取舍、已知问题与下一步演进都写在本文件里，没有藏着。
 > 演示地址：<https://mira.nolo.chat>（Mock 导演，零密钥，打开即用）
 > 演示脚本：[`docs/demo-script.md`](docs/demo-script.md)　AI 使用说明：[`AI_USAGE.md`](AI_USAGE.md)
+> 换一台机器跑起来 / 部署上线 / 对着麦克风测打断：[`docs/deploy.md`](docs/deploy.md)
 
 ## 快速开始
 
