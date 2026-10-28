@@ -14,6 +14,7 @@ import type {
   SessionInfo,
   TurnRequest,
 } from "../../shared/protocol";
+import { describeDirectorFallback, parseDirectorRequest, type DirectorRequest } from "../../shared/director";
 import type { HealthInfo, SessionApi } from "./api";
 import { ApiError, describeApiError, isAbort } from "./api";
 import type { BargeInReason, BargeInResult } from "./bargeIn";
@@ -69,6 +70,8 @@ export interface SessionView {
   draft: string;
   /** 被 epoch 护栏丢掉的迟到事件数（打断链路的可见证据） */
   droppedEvents: number;
+  /** 因「已有一轮在进行」而被丢弃的提交数（并发闸门的可见证据） */
+  droppedSubmits: number;
   turns: number;
   latency: TurnLatency | null;
   busy: boolean;
@@ -82,6 +85,8 @@ export interface SessionStoreDeps {
   api: SessionApi;
   tts: TTSProvider & Partial<AudioChunkSink>;
   audioMode: AudioMode;
+  /** 这个会话请求的导演档位（来自 `?director=`）；不传则从 location.search 读 */
+  directorRequest?: DirectorRequest;
   clock?: () => number;
   /** 首事件超时（默认 8000ms，题目要求 8s） */
   firstEventTimeoutMs?: number;
@@ -108,6 +113,18 @@ function newTurnId(): string {
   return `t_${Date.now().toString(36)}_${rand}`;
 }
 
+/**
+ * 从 URL 读「这个会话请求哪档导演」（`?director=live`）。
+ *
+ * 写法对齐 ui/demo.ts 的 parseDemoFlag：search 直接来自 location.search，纯函数可测。
+ * 不认得的取值一律当「没指定」（交给服务端默认档位）——手打 `?director=1`
+ * 既不会静默变成 live，也不会报错。
+ */
+export function readDirectorRequest(search?: string): DirectorRequest {
+  const raw = search ?? (typeof window === "undefined" ? "" : window.location.search);
+  return parseDirectorRequest(new URLSearchParams(raw).get("director"));
+}
+
 function snapshotScene(machine: SessionMachine): SceneSnapshot {
   return {
     scene: machine.scene.scene,
@@ -122,6 +139,8 @@ function snapshotScene(machine: SessionMachine): SceneSnapshot {
 export class SessionStore {
   private readonly deps: SessionStoreDeps;
   private readonly clock: () => number;
+  /** 建会话时送的档位（定下来就不再改：档位跟着会话走） */
+  private readonly directorRequest: DirectorRequest;
 
   private machine: SessionMachine = createMachine();
   private session: SessionInfo | null = null;
@@ -133,6 +152,9 @@ export class SessionStore {
   private sttLang: SttLang = "zh-CN";
   private draft = "";
   private droppedEvents = 0;
+  private droppedSubmits = 0;
+  /** 「准备期」占用标记：从 submit 入口到请求真正发出为止，同一时刻只允许一个提交 */
+  private startingTurn = false;
   private turns = 0;
   private latency: TurnLatency | null = null;
   private lastUserText: string | null = null;
@@ -147,6 +169,7 @@ export class SessionStore {
   constructor(deps: SessionStoreDeps) {
     this.deps = deps;
     this.clock = deps.clock ?? (() => Date.now());
+    this.directorRequest = deps.directorRequest ?? readDirectorRequest();
     this.view = this.buildView();
   }
 
@@ -179,6 +202,7 @@ export class SessionStore {
       sttLang: this.sttLang,
       draft: this.draft,
       droppedEvents: this.droppedEvents,
+      droppedSubmits: this.droppedSubmits,
       turns: this.turns,
       latency: this.latency,
       busy: this.machine.turnActive,
@@ -219,16 +243,26 @@ export class SessionStore {
     }
 
     try {
-      this.session = await this.deps.api.createSession();
+      this.session = await this.deps.api.createSession(undefined, { director: this.directorRequest });
       this.sessionId = this.session.sessionId;
       this.connection = "online";
-      this.setBanner({
-        text: this.session.keyless
-          ? `已连接 · ${this.session.mode === "live" ? "真模型" : "Mock 导演"}（零密钥可跑）`
-          : `已连接 · ${this.session.mode === "live" ? "真模型" : "Mock 导演"}`,
-        tone: "info",
-        ttlMs: 2_500,
-      });
+      // 请求了真模型却回落成 Mock 时说清楚，不许静默
+      const fallback = describeDirectorFallback(this.session.fallbackReason);
+      this.setBanner(
+        fallback
+          ? {
+              text: `你请求了真模型，但已回落成 Mock 导演：${fallback}`,
+              tone: "warn",
+              ttlMs: 9_000,
+            }
+          : {
+              text: this.session.keyless
+                ? `已连接 · ${this.session.mode === "live" ? "真模型" : "Mock 导演"}（零密钥可跑）`
+                : `已连接 · ${this.session.mode === "live" ? "真模型" : "Mock 导演"}`,
+              tone: "info",
+              ttlMs: 2_500,
+            },
+      );
     } catch (err) {
       // 会话创建失败不等于不能对话：服务端可能是有状态的，用本地 sessionId 兜底
       this.sessionId = "local";
@@ -337,25 +371,55 @@ export class SessionStore {
   async submit(raw: string): Promise<void> {
     const text = raw.trim();
     if (!text) return;
-    this.draft = "";
-    if (needsBargeIn(this.machine)) this.interrupt("input");
-    this.lastUserText = text;
-    await this.startTurn(text);
+
+    // 并发闸门。为什么必须有：startTurn 在会话未就绪时要 await init()，
+    // 这段时间 turnActive 还是 false、epoch 也没动，第二次提交会畅通无阻地
+    // 发出去，两条 POST 共享同一个 epoch —— 等于同一轮跑两份，谁后到谁覆盖状态。
+    // 这里把「准备期」也纳入 in-flight 判据：第二次提交**丢弃**而不是打断重发，
+    // 因为连点两下是误触，不该付两次模型调用、也不该把已经排好的那轮腰斩。
+    if (this.startingTurn) {
+      this.droppedSubmits += 1;
+      this.setBanner({
+        text: "已有一轮在进行，这句话先不发送（等她说完，或按 Esc 打断）",
+        tone: "warn",
+        ttlMs: 2_500,
+      });
+      return;
+    }
+
+    this.startingTurn = true;
+    try {
+      this.draft = "";
+      if (needsBargeIn(this.machine)) this.interrupt("input");
+      this.lastUserText = text;
+      await this.startTurn(text);
+    } finally {
+      this.startingTurn = false;
+    }
   }
 
   /** 失败后的重试入口：沿用上一句输入，重新开一轮（epoch 会再 +1，旧轮彻底作废） */
   async retry(): Promise<void> {
-    const text = this.lastUserText;
-    this.clearBanner();
-    if (needsBargeIn(this.machine)) this.interrupt("retry");
-    if (this.connection !== "online" || !this.sessionId) {
-      await this.init();
-    }
-    if (!text) {
-      this.emit();
+    if (this.startingTurn) {
+      this.droppedSubmits += 1;
       return;
     }
-    await this.startTurn(text);
+    this.startingTurn = true;
+    try {
+      const text = this.lastUserText;
+      this.clearBanner();
+      if (needsBargeIn(this.machine)) this.interrupt("retry");
+      if (this.connection !== "online" || !this.sessionId) {
+        await this.init();
+      }
+      if (!text) {
+        this.emit();
+        return;
+      }
+      await this.startTurn(text);
+    } finally {
+      this.startingTurn = false;
+    }
   }
 
   pickBranch(id: string): void {
@@ -418,6 +482,9 @@ export class SessionStore {
     const controller = new AbortController();
     this.inflight?.abort();
     this.inflight = controller;
+    // 请求已经发出去了，准备期到此结束 —— 解锁后「角色说话中插话」仍然走 barge-in
+    // （epoch+1 + abort 旧流），同一时刻依然最多一个**有效** in-flight turn。
+    this.startingTurn = false;
 
     const startedAt = this.clock();
     let firstEventAt: number | null = null;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Stage } from "./stage/Stage";
+import { reportSessionSignal } from "./stage/clip/clipBus";
 import { createHttpApi } from "./state/api";
 import { SessionStore } from "./state/store";
 import { useSessionView } from "./state/useSession";
@@ -30,14 +31,29 @@ import { useLinkProbe } from "./ui/useLinkProbe";
 interface BootParams {
   audio: AudioMode;
   lang: SttLang;
+  /** 语音自动打断开关（`?bargeIn=voice`），默认关闭 */
+  bargeIn: boolean;
+}
+
+/**
+ * 解析 `?bargeIn=voice`（风格对齐 ui/demo.ts 的开关解析：显式值才算开，默认关）。
+ *
+ * 为什么默认关：能量 VAD 与 STT 转写都不做回声消除，外放时角色自己的声音会被
+ * 认成用户开口 → 自动打断等于自打断（话说一半卡住）。所以语音打断只作为实验特性
+ * 显式开启；按钮 / Esc / 打字打断永远是主路径。
+ */
+export function parseBargeInFlag(search: string): boolean {
+  const raw = (new URLSearchParams(search).get("bargeIn") ?? "").trim().toLowerCase();
+  return raw === "voice" || raw === "1" || raw === "on" || raw === "true";
 }
 
 function readParams(): BootParams {
-  if (typeof window === "undefined") return { audio: "browser", lang: "zh-CN" };
+  if (typeof window === "undefined") return { audio: "browser", lang: "zh-CN", bargeIn: false };
   const params = new URLSearchParams(window.location.search);
   return {
     audio: params.get("audio") === "stream" ? "stream" : "browser",
     lang: params.get("lang") === "en-US" ? "en-US" : "zh-CN",
+    bargeIn: parseBargeInFlag(window.location.search),
   };
 }
 
@@ -74,6 +90,12 @@ export function App() {
   useEffect(() => {
     viewRef.current = view;
   }, [view]);
+
+  // 片段的外部中止源：epoch 变化（用户打断 / 换轮）或新一轮开始 → 立刻停帧并隐藏。
+  // 注意不能拿「轮次数」当信号：它在 turn.end 才 +1，会在片段播到一半时误判成打断。
+  useEffect(() => {
+    reportSessionSignal(view.machine.epoch, view.machine.turnId ?? null);
+  }, [view.machine.epoch, view.machine.turnId]);
 
   const [interim, setInterim] = useState("");
   const [note, setNote] = useState<string | null>(null);
@@ -184,8 +206,17 @@ export function App() {
         const current = viewRef.current;
         if (!current) return;
         if (current.scene.characterStatus === "speaking") {
-          // 不把角色自己的声音当成用户输入（回声防护），但要给出明确指引
-          setNote(`听到「${text}」，但她还在说话 —— 按 Esc 打断，或等她说完再说一次`);
+          if (!boot.bargeIn) {
+            // 默认路径：不把角色自己的声音当成用户输入（回声防护），但要给出明确指引
+            setNote(`听到「${text}」，但她还在说话 —— 按 Esc 打断，或等她说完再说一次`);
+            return;
+          }
+          // ?bargeIn=voice：显式开启的语音打断。先 interrupt("speech") 把 epoch+1、
+          // 静音并 abort 旧流，再提交这一句；转写本身不做回声消除，所以默认不开。
+          setNote(null);
+          store.interrupt("speech");
+          warmUpTts(tts);
+          void store.submit(text);
           return;
         }
         setNote(null);
@@ -213,7 +244,7 @@ export function App() {
       stt.abort();
       sttRef.current = null;
     };
-  }, [store, tts, boot.lang]);
+  }, [store, tts, boot.lang, boot.bargeIn]);
 
   useEffect(() => {
     sttRef.current?.setLang(view.sttLang);

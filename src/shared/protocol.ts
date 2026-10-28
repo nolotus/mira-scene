@@ -14,6 +14,8 @@
  *    这样 Mock 导演、真 LLM 导演、回放导演共用同一条渲染路径。
  */
 
+import type { DirectorFallbackReason } from "./director";
+
 // ---------------------------------------------------------------- 视觉词汇表
 
 /** 情绪（题目要求至少 3 种可辨认） */
@@ -179,6 +181,11 @@ export interface SessionInfo {
   directorName: string;
   /** 零密钥可跑标志：true 表示无需任何私钥即可体验完整流程 */
   keyless: boolean;
+  /**
+   * 请求了真模型却被会话回落成 Mock 的原因（没回落时为 null / 缺省）。
+   * 界面必须把原因显示出来，不许静默：`DIRECTOR=mock` 强制、或服务端没配密钥。
+   */
+  fallbackReason?: DirectorFallbackReason | null;
 }
 
 /** POST /api/turn/:turnId/cancel 的返回值 */

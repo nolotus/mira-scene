@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, type FormEvent, type PointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, type FormEvent, type PointerEvent } from "react";
+import { describeDirectorFallback } from "../../shared/director";
 import type { CharacterStatus } from "../../shared/protocol";
 import type { SessionView } from "../state/store";
 import type { SttLang } from "../voice/stt";
-import type { MicNotice, RuntimeErrorNotice } from "./availability";
+import { describeInputMode, type MicNotice, type RuntimeErrorNotice } from "./availability";
 import { Diagnostics } from "./Diagnostics";
 import type { DemoFlags } from "./demo";
 import { ConnectionStrip, MediaErrorStrip } from "./Notices";
@@ -78,6 +79,21 @@ export function Dock(props: DockProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const micLabel = micLabelOf(view, props.micNotice);
 
+  // 语音识别不可用（例如 iOS Safari 没有 Web Speech STT）时：文字输入直接当主入口 ——
+  // 聚焦 + 改 placeholder + 一句「这台设备只能打字」，而不是只丢一句「不支持」。
+  const inputMode = useMemo(
+    () =>
+      describeInputMode({
+        speechSupported: props.diagnostics.speechSupported,
+        userAgent: typeof navigator === "undefined" ? undefined : navigator.userAgent,
+      }),
+    [props.diagnostics.speechSupported],
+  );
+
+  useEffect(() => {
+    if (inputMode.focusInput) inputRef.current?.focus();
+  }, [inputMode.focusInput]);
+
   const onSubmit = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -109,6 +125,14 @@ export function Dock(props: DockProps) {
         <span className="mira-chip">
           {view.session ? (view.session.mode === "live" ? "真模型" : "Mock 导演") : "未连接"}
         </span>
+        {view.session?.fallbackReason ? (
+          <span
+            className="mira-chip"
+            title={describeDirectorFallback(view.session.fallbackReason) ?? view.session.fallbackReason}
+          >
+            {view.session.fallbackReason === "forced-mock" ? "已回落：强制 Mock" : "已回落：未配置密钥"}
+          </span>
+        ) : null}
         <span className="mira-chip">{view.audioMode === "stream" ? "流式音频" : "浏览器 TTS"}</span>
         {(view.session?.keyless ?? true) ? (
           <span className="mira-chip mira-chip--ok" title="无需任何 API key 即可跑通">
@@ -131,8 +155,8 @@ export function Dock(props: DockProps) {
           className="mira-input"
           value={view.draft}
           onChange={(event) => props.onDraft(event.target.value)}
-          placeholder={status === "speaking" ? "直接打字会打断她…" : "和 Mira 说点什么…（回车发送）"}
-          aria-label="输入框"
+          placeholder={status === "speaking" ? "直接打字会打断她…" : inputMode.placeholder}
+          aria-label={inputMode.primary === "text" ? "输入框（这台设备只能打字）" : "输入框"}
           autoComplete="off"
         />
         <button type="submit" className="mira-btn mira-btn--send" disabled={!view.draft.trim()}>

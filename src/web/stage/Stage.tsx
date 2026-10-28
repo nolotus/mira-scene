@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import type { StageProps } from "../../shared/protocol";
 import { Character } from "./Character";
+import { ClipPlayer } from "./clip/ClipPlayer";
 import { Cues } from "./Cues";
 import { StageBackdrop } from "./StageBackdrop";
 import { STATUS_LABEL, toneOf, vfxVars } from "./visuals";
@@ -63,6 +64,8 @@ export function Stage({ state, onBranchPick }: StageProps) {
           </div>
           {/* 演出编排层：把这一句触发的离散指令编成一段有时长的演出（角色之上、字幕之下） */}
           <Cues state={state} />
+          {/* 真媒体片段（spritesheet）：storm 演出命中时播一次；层级在角色之上、字幕之下 */}
+          <ClipPlayer state={state} />
         </div>
 
         <header className="stage-hud" aria-hidden="true">

@@ -12,6 +12,9 @@
  * 不打印、不写盘、不回显 —— 对外只暴露 provider label 与模型名。
  */
 
+import { parseDirectorRequest, type DirectorRequest } from "../shared/director.ts";
+import { resolveDirectorMode } from "./director/resolve.ts";
+
 export type LlmProviderId = "deepseek" | "custom";
 
 export interface LlmProvider {
@@ -37,7 +40,15 @@ export const LLM_DEFAULTS = {
 export interface ServerConfig {
   port: number;
   isProd: boolean;
-  /** 实际生效的导演档位：显式 DIRECTOR=live 且解析到可用 key 才 live */
+  /**
+   * 环境变量显式请求的档位（`DIRECTOR=live|mock`）；null = 没设置，默认 Mock。
+   * 注意这只表示「环境想要什么」，会话实际用哪个档位由 resolveDirectorMode() 决定。
+   */
+  directorEnvMode: DirectorRequest;
+  /**
+   * 环境默认档位（= 客户端不指定时用的档位）：DIRECTOR=live 且解析到可用 key 才 live。
+   * 保留原有字段名与语义，仅作「默认值」，单个会话可被 URL 请求覆盖。
+   */
   directorMode: "mock" | "live";
   /** 解析出的真模型 provider；null = keyless（只剩 Mock） */
   llm: LlmProvider | null;
@@ -103,12 +114,19 @@ function toScale(raw: string | undefined): number {
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): ServerConfig {
   const llm = resolveLlmProvider(env);
-  const wantsLive = (env.DIRECTOR ?? "mock").trim().toLowerCase() === "live";
+  // DIRECTOR=live → 所有会话默认 live；DIRECTOR=mock → 强制 mock；未设置/无法识别 → 默认 mock
+  const directorEnvMode = parseDirectorRequest(env.DIRECTOR);
+  // 默认档位 = 「客户端没指定」时的解析结果，与单会话共用同一套回落规则
+  const defaults = resolveDirectorMode(null, {
+    envMode: directorEnvMode,
+    liveAvailable: llm !== null,
+  });
 
   return {
     port: toPort(env.SERVER_PORT),
     isProd: (env.NODE_ENV ?? "development").trim() === "production",
-    directorMode: wantsLive && llm ? "live" : "mock",
+    directorEnvMode,
+    directorMode: defaults.mode,
     llm,
     mockDelayScale: toScale(env.MOCK_DELAY_SCALE),
     devOrigins: ["http://localhost:5173", "http://127.0.0.1:5173"],

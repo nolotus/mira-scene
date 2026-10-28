@@ -3,9 +3,14 @@
  *
  * 主界面只留「出了什么事」的可见反馈；延迟/模式这类数字塞进这里，
  * 需要时展开（录屏时用来证明 8s 超时、打断丢事件是真的发生过的），不需要时不占地方。
+ *
+ * 「媒体片段」这一行是片段的失败留痕：失败会静默降级为角色画面，但绝不允许只在 console 里
+ * 悄悄错 —— 最新状态写进固定行，最近几条生命周期写进下面的列表，失败时 summary 上带红字。
  */
 
 import type { SessionView } from "../state/store";
+import { latestClipDiagnostic, useClipDiagnostics } from "../stage/clip/clipBus";
+import { clipPhaseLabel } from "../stage/clip/clipState";
 import type { DemoFlags } from "./demo";
 
 export interface DiagnosticsProps {
@@ -34,6 +39,9 @@ const MIC_LABEL: Record<SessionView["mic"], string> = {
 
 export function Diagnostics(props: DiagnosticsProps) {
   const { view } = props;
+  const clipRecords = useClipDiagnostics();
+  const clipLatest = latestClipDiagnostic(clipRecords);
+  const clipFailed = clipLatest?.phase === "failed";
   const rows: Array<[string, string, string?]> = [
     [
       "首字延迟",
@@ -55,11 +63,19 @@ export function Diagnostics(props: DiagnosticsProps) {
     ["语音识别", props.speechSupported ? "可用" : "不支持"],
     ["演示模式", props.demo.active ? `开（?demo=${props.demo.raw}）` : "关"],
     ["轮次", String(view.turns)],
+    [
+      "媒体片段",
+      clipLatest ? clipPhaseLabel(clipLatest.phase) : "未播放",
+      "storm 演出触发的 spritesheet 片段（12 帧 @12fps）",
+    ],
   ];
 
   return (
     <details className="mira-diag" data-demo={props.demo.active ? "on" : "off"}>
-      <summary className="mira-diag__summary">诊断</summary>
+      <summary className="mira-diag__summary">
+        诊断
+        {clipFailed ? <span className="mira-diag__alert">片段失败</span> : null}
+      </summary>
       <dl className="mira-diag__grid">
         {rows.map(([label, value, hint]) => (
           <div className="mira-diag__row" key={label}>
@@ -69,6 +85,15 @@ export function Diagnostics(props: DiagnosticsProps) {
         ))}
       </dl>
       {props.probeError ? <p className="mira-diag__err">最近一次健康探测：{props.probeError}</p> : null}
+      {clipRecords.length > 0 ? (
+        <ul className="mira-diag__clip" data-clip-phase={clipLatest?.phase ?? "idle"}>
+          {clipRecords.slice(-3).map((record) => (
+            <li key={record.id} data-tone={record.tone}>
+              {record.detail}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </details>
   );
 }

@@ -266,6 +266,13 @@ export function reduceEvent(
   if (event.epoch !== machine.epoch) {
     return { machine, outcome: "stale-epoch" };
   }
+  // 不变量：没有进行中的轮次时，唯一允许进入的是 turn.start。
+  // 拦的是「turn.end 已收尾、同一轮的事件还在路上」这一情形 —— 在此之前
+  // turnId 会留在机器上，于是 epoch 相等 + turnId 相等，两道闸门都放行，
+  // 一条迟到 text.delta 能把角色从 idle 拉回 speaking 并往字幕上追加内容。
+  if (!machine.turnActive && event.type !== "turn.start") {
+    return { machine, outcome: "stale-turn" };
+  }
   if (machine.turnId !== null && event.turnId !== machine.turnId) {
     return { machine, outcome: "stale-turn" };
   }
@@ -326,6 +333,9 @@ export function reduceEvent(
         machine: {
           ...machine,
           turnActive: false,
+          // 轮次收尾必须释放 turnId：留着它等于给「同一轮的迟到事件」留一把钥匙
+          // （epoch 正常收尾不变，turnId 若还在，双闸门同时失效）
+          turnId: null,
           lastTurnId: event.turnId,
           scene: withStatus(machine.scene, "idle"),
         },

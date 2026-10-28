@@ -5,6 +5,8 @@
  * 导演需要「上一轮说了什么」才有一致的角色记忆。客户端送来的 history 只作为兜底。
  */
 
+import type { DirectorFallbackReason, DirectorMode } from "../shared/director.ts";
+
 export interface SessionMessage {
   role: "user" | "character";
   text: string;
@@ -19,12 +21,29 @@ export interface SessionRecord {
   /** 本轮之前已演出过的显著 beat（供导演避免重复放同一个高光事件） */
   playedBeats: string[];
   turns: number;
+  /**
+   * 这个会话用哪个导演 —— 会话创建时定下，之后每轮 turn 都沿用它。
+   * 轮内不再重读 URL / 环境变量：会话中途换档会让同一次对话的上下文对不上。
+   */
+  director: SessionDirector;
 }
+
+/** 会话维度上的导演选择结果（= server/director/resolve.ts 的 DirectorResolution） */
+export interface SessionDirector {
+  mode: DirectorMode;
+  reason: DirectorFallbackReason | null;
+}
+
+const DEFAULT_SESSION_DIRECTOR: SessionDirector = { mode: "mock", reason: null };
 
 export class SessionStore {
   readonly #sessions = new Map<string, SessionRecord>();
 
-  ensure(sessionId: string): SessionRecord {
+  /**
+   * 取会话；不存在则用给定的导演选择创建。
+   * 已存在的会话**保留**原导演（ensure 不是「重置」）——这是「档位跟着会话走」的落点。
+   */
+  ensure(sessionId: string, director: SessionDirector = DEFAULT_SESSION_DIRECTOR): SessionRecord {
     const existing = this.#sessions.get(sessionId);
     if (existing) return existing;
     const now = Date.now();
@@ -35,9 +54,15 @@ export class SessionStore {
       messages: [],
       playedBeats: [],
       turns: 0,
+      director: { mode: director.mode, reason: director.reason },
     };
     this.#sessions.set(sessionId, record);
     return record;
+  }
+
+  /** 会话的导演选择；会话不存在时返回 undefined（调用方按默认档位处理） */
+  directorOf(sessionId: string): SessionDirector | undefined {
+    return this.#sessions.get(sessionId)?.director;
   }
 
   get(sessionId: string): SessionRecord | undefined {

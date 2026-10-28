@@ -18,6 +18,7 @@ import type {
   SessionInfo,
   TurnRequest,
 } from "../../shared/protocol";
+import { isDirectorFallbackReason, type DirectorRequest } from "../../shared/director";
 
 export type ApiErrorKind =
   | "network"
@@ -91,9 +92,17 @@ export interface StreamOptions {
   baseUrl?: string;
 }
 
+export interface CreateSessionOptions {
+  /**
+   * 这个会话请求的档位（`?director=live`）。
+   * 不传 / null = 不指定，由服务端默认档位决定（默认 Mock）。
+   */
+  director?: DirectorRequest;
+}
+
 export interface SessionApi {
   health(signal?: AbortSignal): Promise<HealthInfo>;
-  createSession(signal?: AbortSignal): Promise<SessionInfo>;
+  createSession(signal?: AbortSignal, options?: CreateSessionOptions): Promise<SessionInfo>;
   streamTurn(req: TurnRequest, handlers: TurnStreamHandlers, opts?: StreamOptions): Promise<void>;
   cancelTurn(turnId: string, epoch: number, signal?: AbortSignal): Promise<CancelResult>;
 }
@@ -370,8 +379,10 @@ export function createHttpApi(options: HttpApiOptions = {}): SessionApi {
       } as HealthInfo;
     },
 
-    async createSession(signal) {
-      const raw = await requestJson<Partial<SessionInfo>>(`${base}/api/session`, {
+    async createSession(signal, options) {
+      // 档位只在建会话时送一次：服务端把这个会话的档位存下来，之后每轮 turn 都沿用它
+      const query = options?.director ? `?director=${encodeURIComponent(options.director)}` : "";
+      const raw = await requestJson<Partial<SessionInfo>>(`${base}/api/session${query}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({}),
@@ -384,6 +395,8 @@ export function createHttpApi(options: HttpApiOptions = {}): SessionApi {
         mode: raw.mode === "live" ? "live" : "mock",
         directorName: raw.directorName ?? "unknown",
         keyless: raw.keyless !== false,
+        // 只认协议里的两种原因码；其它（含缺省、脏值）一律当「没回落」，不透给界面
+        fallbackReason: isDirectorFallbackReason(raw.fallbackReason) ? raw.fallbackReason : null,
       };
     },
 

@@ -5,28 +5,44 @@
  * 1. src/server/index.ts 只负责「起进程」，测试可以直接拿 app.fetch 打请求，不占端口；
  * 2. 导演可以被注入（测试里塞一个加速的 MockDirector）。
  *
+ * 导演的分辨（live / 回落 mock）发生在**会话创建时**：
+ *   URL `?director=live` → POST /api/session → resolveDirectorMode() →
+ *   结果存进 SessionRecord.director → 之后每轮 /api/turn 只读会话里那份，不重读 URL / env。
+ *
  * 事件生命周期由服务端统一收口：turn.start 一定在最先、turn.end 一定在最后，
  * 即使导演抛错或被打断也一样 —— 客户端只需要盯最后一条 turn.end。
  */
 import { extname, join, resolve, sep } from "node:path";
+import {
+  parseDirectorRequest,
+  type DirectorMode,
+  type DirectorRequest,
+} from "../shared/director.ts";
 import type { Director, DirectorInput, SceneSnapshot, SessionEvent, SessionInfo, TurnRequest } from "../shared/protocol.ts";
 import { loadConfig, type ServerConfig } from "./config.ts";
-import { createDirector, directorModeOf } from "./director/index.ts";
+import { createDirector } from "./director/index.ts";
+import { resolveDirectorMode, type DirectorAvailability, type DirectorResolution } from "./director/resolve.ts";
 import { isEmotion, isPose, isSceneVariant, validateDirective } from "./scene/validate.ts";
 import { SessionStore, TurnRegistry } from "./sessions.ts";
 
 export interface AppOptions {
   config?: ServerConfig;
+  /** 注入一个导演，两个档位都用它（测试用；会盖过 directorFactory） */
   director?: Director;
+  /** 按档位造导演（测试用：想在 live / mock 下拿到不同的假导演） */
+  directorFactory?: (mode: DirectorMode) => Director;
   sessions?: SessionStore;
 }
 
 export interface App {
   fetch(request: Request): Promise<Response>;
   readonly config: ServerConfig;
+  /** 环境默认档位的导演（服务端自检/日志用；单轮实际用哪个看 directorFor） */
   readonly director: Director;
   readonly sessions: SessionStore;
   readonly turns: TurnRegistry;
+  /** 档位 → 导演实例（同档位复用同一个实例） */
+  directorFor(mode: DirectorMode): Director;
 }
 
 /** 客户端没送 scene 时的默认画面（Mira 靠在吧台，握着杯子） */
@@ -56,9 +72,40 @@ const MIME_TYPES: Record<string, string> = {
 
 export function createApp(options: AppOptions = {}): App {
   const config = options.config ?? loadConfig();
-  const director = options.director ?? createDirector(config);
   const sessions = options.sessions ?? new SessionStore();
   const turns = new TurnRegistry();
+
+  /** 「回落」判断的输入：环境想要什么 + 有没有可用真模型（不含任何密钥内容） */
+  const availability: DirectorAvailability = {
+    envMode: config.directorEnvMode,
+    liveAvailable: config.llm !== null,
+  };
+
+  const injected = options.director;
+  const factory = options.directorFactory;
+  const directorCache = new Map<DirectorMode, Director>();
+
+  /** 档位 → 导演（同档位复用同一实例）。逐轮只按会话里记下的档位取，绝不在这里改档位。 */
+  const directorFor = (mode: DirectorMode): Director => {
+    if (injected) return injected;
+    const cached = directorCache.get(mode);
+    if (cached) return cached;
+    const created = factory
+      ? factory(mode)
+      : createDirector({
+          directorMode: mode,
+          llm: config.llm,
+          mockDelayScale: config.mockDelayScale,
+        });
+    directorCache.set(mode, created);
+    return created;
+  };
+
+  /** 环境默认档位的导演（服务端日志/自检用） */
+  const director = directorFor(config.directorMode);
+
+  /** 客户端没指定档位时的会话导演 = 环境默认档位 */
+  const defaultChoice = (): DirectorResolution => resolveDirectorMode(null, availability);
 
   const corsFor = (origin: string | null): Record<string, string> => {
     if (config.isProd || !origin || !config.devOrigins.includes(origin)) return {};
@@ -94,17 +141,26 @@ export function createApp(options: AppOptions = {}): App {
 
     if (path === "/api/session") {
       if (request.method !== "POST") return json({ error: "method not allowed" }, 405, origin);
-      const body = (await safeJson(request)) as { sessionId?: unknown } | null;
+      const body = (await safeJson(request)) as { sessionId?: unknown; director?: unknown } | null;
       const requested = typeof body?.sessionId === "string" ? body.sessionId.trim() : "";
       const sessionId = requested || crypto.randomUUID();
-      sessions.ensure(sessionId);
-      const mode = directorModeOf(director);
+      // 档位来源：query 优先（?director=live），其次 body.director，都没有 = 不指定
+      const directorRequest: DirectorRequest = parseDirectorRequest(
+        url.searchParams.get("director") ?? (typeof body?.director === "string" ? body.director : null),
+      );
+      // 已存在的会话保留它创建时的档位（档位跟着会话走，重连/重入不会被 URL 改掉）
+      const existing = sessions.get(sessionId);
+      const choice = existing?.director ?? resolveDirectorMode(directorRequest, availability);
+      const record = sessions.ensure(sessionId, choice);
+      const served = directorFor(record.director.mode);
       const info: SessionInfo = {
         sessionId,
-        mode,
-        directorName: director.name,
+        mode: record.director.mode,
+        directorName: served.name,
         // 零密钥可跑：mock 档不需要任何私钥
-        keyless: mode === "mock",
+        keyless: record.director.mode === "mock",
+        // 请求了 live 却回落时，这里说明原因（界面必须显示，不许静默）
+        fallbackReason: record.director.reason,
       };
       return json(info, 200, origin);
     }
@@ -121,7 +177,9 @@ export function createApp(options: AppOptions = {}): App {
       if (request.method !== "POST") return json({ error: "method not allowed" }, 405, origin);
       const parsed = parseTurnRequest(await safeJson(request));
       if (!parsed.ok) return json({ error: parsed.error }, 400, origin);
-      return streamTurn(parsed.value, origin);
+      // 本轮用哪个导演：只认会话里记下的那份（URL/env 在这一步一律不读）
+      const record = sessions.ensure(parsed.value.sessionId, defaultChoice());
+      return streamTurn(parsed.value, origin, directorFor(record.director.mode));
     }
 
     const sessionMatch = /^\/api\/session\/([^/]+)$/.exec(path);
@@ -181,7 +239,7 @@ export function createApp(options: AppOptions = {}): App {
    * 顺序保证：turn.start →（directive / text.delta / error 任意交织）→ turn.end。
    * 被打断时 turn.end.interrupted = true。
    */
-  function streamTurn(body: TurnRequest, origin: string | null): Response {
+  function streamTurn(body: TurnRequest, origin: string | null, director: Director): Response {
     const { sessionId, turnId, epoch, userText } = body;
     const record = sessions.ensure(sessionId);
     // 服务端历史优先；没有（比如新会话/回放）才用客户端送来的 history
@@ -199,8 +257,14 @@ export function createApp(options: AppOptions = {}): App {
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
         const elapsed = (): number => Math.round(performance.now() - startedAt);
-        const push = (event: SessionEvent): void => {
+        const push = (event: SessionEvent, opts?: { force?: boolean }): void => {
+          // closed = 流已收尾/客户端断开；aborted = 本轮被 cancel。
+          // cancel 之后不允许再推导演产出：客户端已经把这一轮作废了，
+          // 继续推只会在「已打断」之后又冒出字幕（本地已 abort 时则是白烧 token）。
+          // force 只留给收尾的 turn.end —— 它是客户端判定「这轮结束」的唯一信号，
+          // 被 cancel 的轮次反而更需要它把 interrupted=true 送达。
           if (state.closed) return;
+          if (signal.aborted && !opts?.force) return;
           try {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
           } catch {
@@ -217,6 +281,8 @@ export function createApp(options: AppOptions = {}): App {
 
           try {
             for await (const event of director.stream(input, signal)) {
+              // 被打断就立刻停：导演如果没理会 signal，这里也不能继续往外喂事件
+              if (signal.aborted) break;
               // 生命周期事件只能由服务端发，导演层如果自己也发就丢掉，避免重复 turn.end
               if (event.type === "turn.start" || event.type === "turn.end") continue;
 
@@ -248,7 +314,7 @@ export function createApp(options: AppOptions = {}): App {
             interrupted = signal.aborted;
             timings.total = elapsed();
             if (said.trim()) sessions.append(sessionId, "character", said.trim());
-            push({ type: "turn.end", turnId, epoch, interrupted, timings });
+          push({ type: "turn.end", turnId, epoch, interrupted, timings }, { force: true });
             turns.finish(turnId);
             state.closed = true;
             try {
@@ -279,7 +345,7 @@ export function createApp(options: AppOptions = {}): App {
     });
   }
 
-  return { fetch: handleFetch, config, director, sessions, turns };
+  return { fetch: handleFetch, config, director, sessions, turns, directorFor };
 }
 
 // ------------------------------------------------------------------ 请求解析

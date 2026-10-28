@@ -9,19 +9,26 @@
  *   ?demo=fail     首轮 SSE 请求直接失败（API 层抛错，走的是和真实 5xx 同一套反馈路径）
  *   ?demo=timeout  首轮不发请求，等满 8s 触发「首事件超时」（真实超时逻辑，不是假提示）
  *   ?demo=tts      首轮 TTS 抛错 → 未捕获拒绝 → 媒体错误提示（走全局 unhandledrejection 兜底）
- *   ?demo=all      以上三种全部注入
+ *   ?demo=media    片段资源地址换成必定 404 的地址（演示「加载失败 → 静默降级 → 诊断留痕」）
+ *   ?demo=all      以上三种对话故障全部注入（media 需显式指定，避免污染既有录屏）
  *   其它任何非空值  等同于 fail（手打 ?demo=1 也一定能看到故障，不会静默无效）
  *
  * 注入都是「一次性」的：第二次请求/第二次朗读走真实实现，
  * 于是「故障 → 点重试 → 恢复正常」可以在一次录制里完整演完。
  */
 
-import type { HealthInfo, SessionApi, StreamOptions, TurnStreamHandlers } from "../state/api";
+import type {
+  CreateSessionOptions,
+  HealthInfo,
+  SessionApi,
+  StreamOptions,
+  TurnStreamHandlers,
+} from "../state/api";
 import { ApiError } from "../state/api";
 import type { AudioChunk, AudioChunkSink, TTSProvider } from "../voice/tts";
 import type { TurnRequest, CancelResult, SessionInfo } from "../../shared/protocol";
 
-export type DemoFault = "turn" | "timeout" | "tts";
+export type DemoFault = "turn" | "timeout" | "tts" | "media";
 
 export interface DemoFlags {
   /** 是否开启演示模式 */
@@ -44,6 +51,7 @@ const FAULT_LABEL: Record<DemoFault, string> = {
   turn: "首次对话请求直接失败",
   timeout: "首字等待满 8s（真实超时链路）",
   tts: "首句朗读抛错（走 unhandledrejection 兜底）",
+  media: "片段地址必定 404（演示加载失败后的静默降级）",
 };
 
 /** 解析 `?demo=…`。纯函数，输入的 search 直接来自 location.search。 */
@@ -57,10 +65,12 @@ export function parseDemoFlag(search: string): DemoFlags {
   if (raw === "fail" || raw === "all") faults.add("turn");
   if (raw === "timeout" || raw === "all") faults.add("timeout");
   if (raw === "tts" || raw === "all") faults.add("tts");
+  // media 不并入 all：片段故障会遮住视觉层，只应在专门演示降级时显式打开
+  if (raw === "media") faults.add("media");
   // 未知取值一律当作 fail：评审手打 ?demo=xyz 时应看到故障与标注，而不是「什么都没发生」
   if (faults.size === 0) faults.add("turn");
 
-  const list = (["turn", "timeout", "tts"] as const).filter((fault) => faults.has(fault));
+  const list = (["turn", "timeout", "tts", "media"] as const).filter((fault) => faults.has(fault));
   return {
     active: true,
     raw,
@@ -106,8 +116,9 @@ export function withDemoApi(api: SessionApi, flags: DemoFlags): SessionApi {
     health(signal?: AbortSignal): Promise<HealthInfo> {
       return api.health(signal);
     },
-    createSession(signal?: AbortSignal): Promise<SessionInfo> {
-      return api.createSession(signal);
+    createSession(signal?: AbortSignal, options?: CreateSessionOptions): Promise<SessionInfo> {
+      // 包装层必须原样转发：否则 ?demo= 会顺手把 ?director= 吃掉
+      return api.createSession(signal, options);
     },
     cancelTurn(turnId: string, epoch: number, signal?: AbortSignal): Promise<CancelResult> {
       return api.cancelTurn(turnId, epoch, signal);

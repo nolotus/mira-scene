@@ -107,6 +107,56 @@ export function describeMicAvailability(input: MicAvailabilityInput): MicNotice 
   return null;
 }
 
+// ---------------------------------------------------------------- 输入主入口
+
+/**
+ * 「这台设备该用哪个入口」的判定 —— 纯函数，输入只有两个环境事实。
+ *
+ * 背景：iOS Safari 没有 Web Speech STT（`webkitSpeechRecognition` 在 iOS 上不可用/不稳定），
+ * 评审在 iPhone 上打开时，语音按钮注定失败。这时**不能只甩一句「不支持」就完了**，
+ * 必须把文字输入直接变成主入口：聚焦 + 改 placeholder + 一句短提示说清「只能打字」。
+ */
+export interface InputModeInput {
+  /** Web Speech（SpeechRecognition）是否可用 */
+  speechSupported: boolean;
+  /** navigator.userAgent（未知时传 undefined，只影响文案细节） */
+  userAgent?: string | undefined;
+}
+
+export interface InputMode {
+  /** voice：语音是主入口；text：语音不可用，文字是唯一主入口 */
+  primary: "voice" | "text";
+  /** 一句短提示；null = 不需要多说 */
+  hint: string | null;
+  /** 输入框 placeholder（角色说话时会另用打断提示） */
+  placeholder: string;
+  /** 是否在挂载时把焦点放进输入框 */
+  focusInput: boolean;
+}
+
+const VOICE_PLACEHOLDER = "和 Mira 说点什么…（回车发送）";
+const TEXT_PLACEHOLDER = "在这台设备上打字，和 Mira 说话…（回车发送）";
+
+export function describeInputMode(input: InputModeInput): InputMode {
+  if (input.speechSupported) {
+    return {
+      primary: "voice",
+      hint: null,
+      placeholder: VOICE_PLACEHOLDER,
+      focusInput: false,
+    };
+  }
+
+  const ua = input.userAgent ?? "";
+  const apple = /iPad|iPhone|iPod/.test(ua);
+  return {
+    primary: "text",
+    hint: apple ? "这台设备只能打字：iOS 网页没有语音识别" : "这台设备只能打字：浏览器没有语音识别",
+    placeholder: TEXT_PLACEHOLDER,
+    focusInput: true,
+  };
+}
+
 // ---------------------------------------------------------------- 未捕获错误
 
 export type RuntimeErrorKind = "error" | "rejection";
