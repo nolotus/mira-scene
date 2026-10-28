@@ -836,9 +836,6 @@
   transform-origin: 30% 90%;
 }
 
-.coat-drop {
-  animation: dropTwinkle 7s ease-in-out infinite;
-}
 
 /* ---- 眼睛：情绪换开口（裁剪）、瞳孔大小、眨眼重播 ---------------------- */
 
@@ -1715,10 +1712,6 @@
   96% { opacity: 0.2; transform: scale(1); }
 }
 
-@keyframes dropTwinkle {
-  0%, 100% { opacity: 0.28; }
-  50% { opacity: 0.62; }
-}
 
 @keyframes beatFlash {
   0% { opacity: 0; }

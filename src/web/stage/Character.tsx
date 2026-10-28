@@ -371,20 +371,9 @@ export function Character({ state, actionNonce }: CharacterProps) {
                       fill="none"
                       opacity="0.35"
                     />
-                    {/* 上半身雨珠 */}
-                    {UPPER_DROPS.map(([cx, cy, rx, ry], i) => (
-                      <ellipse
-                        key={`d${i}`}
-                        className="coat-drop"
-                        cx={cx}
-                        cy={cy}
-                        rx={rx}
-                        ry={ry}
-                        fill="#ffeccc"
-                        opacity="0.42"
-                        style={{ animationDelay: `${i * 0.7}s` }}
-                      />
-                    ))}
+                    {/* 上衣不再散布雨珠：原来的 4+4 个静止淡色椭圆在待机态也一直亮着，
+                        没有水流方向、没有形成轨迹，读作「污渍」而不是雨。雨的表达交给
+                        窗外的 rain-layer 与演出期的 vfx。 */}
                   </g>
 
                   {/* 5. 下摆（独立组，origin 在肩部：呼吸/动作时 2–4px 延迟摆动） */}
@@ -401,20 +390,7 @@ export function Character({ state, actionNonce }: CharacterProps) {
                       fill="none"
                       strokeLinecap="round"
                     />
-                    {/* 下摆雨珠（跟着下摆一起晃） */}
-                    {HEM_DROPS.map(([cx, cy, rx, ry], i) => (
-                      <ellipse
-                        key={`h${i}`}
-                        className="coat-drop"
-                        cx={cx}
-                        cy={cy}
-                        rx={rx}
-                        ry={ry}
-                        fill="#ffeccc"
-                        opacity="0.42"
-                        style={{ animationDelay: `${(i + 3) * 0.65}s` }}
-                      />
-                    ))}
+
                   </g>
                 </g>
 
@@ -596,6 +572,15 @@ export function Character({ state, actionNonce }: CharacterProps) {
                       d="M112,206 C116,130 148,92 200,92 C252,92 284,130 288,206 C278,172 258,152 230,143 C212,138 198,152 184,163 C168,176 142,190 112,206 Z"
                       fill="#241811"
                     />
+                    {/* 发缝补片：后发的内挖空（y≈120–162）与刘海底边（x≈212 处升至 y≈138）之间
+                        曾露出一块额头皮肤，在头顶读成「假发中缝」。这里用与刘海同色的覆盖路径把
+                        缺口填上：上沿钻进刘海内部避免接缝，下沿是一道连续发际线（y≈158–164，
+                        高于眉毛 y≈173 至少 9px，不会压眼）。 */}
+                    <path
+                      className="hair-part-fill"
+                      d="M184,164 C194,150 206,140 216,134 C226,128 238,136 248,146 C256,152 262,156 268,160 C254,158 232,158 210,159 C198,160 188,162 184,164 Z"
+                      fill="#241811"
+                    />
                     <path d="M236,140 C222,152 214,170 212,188" stroke="#6d4c35" strokeWidth="2.4" fill="none" opacity="0.6" strokeLinecap="round" />
                     <path d="M168,146 C160,160 156,174 156,186" stroke="#6d4c35" strokeWidth="2" fill="none" opacity="0.45" strokeLinecap="round" />
                     {/* 前景发绺：别头发时会被拨动。曾用 mx-hair 渐变，在额头上读成一道浅色斜线，改深色 */}
@@ -715,22 +700,6 @@ function eyeLower(cx: number, s: EyeShape): string {
   const c = 195.5;
   return `M${cx - 14},${c + s.down * 0.35} C${cx - 7},${c + s.down * 0.9} ${cx + 7},${c + s.down * 0.9} ${cx + 14},${c + s.down * 0.35}`;
 }
-
-/** 上半身的雨珠 */
-const UPPER_DROPS: [number, number, number, number][] = [
-  [116, 372, 4.5, 6.5],
-  [292, 356, 4, 6],
-  [136, 448, 5, 7],
-  [268, 470, 4.5, 6.5],
-];
-
-/** 下摆的雨珠（跟着下摆摆） */
-const HEM_DROPS: [number, number, number, number][] = [
-  [98, 486, 4, 5.5],
-  [308, 512, 5, 7],
-  [176, 500, 3.5, 5],
-  [230, 528, 4, 6],
-];
 
 // ---------------------------------------------------------------- 五官路径表
 
