@@ -12,6 +12,7 @@ import { createApp, sttUpgradeGate } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { directorModeOf } from "./director/index.ts";
 import { createEdgeTtsSynthesizer } from "./edgeTts.ts";
+import { createEdgeWsClient } from "./edgeTtsWs.ts";
 import { parseSttControl, type SttBridge } from "./stt.ts";
 
 const config = loadConfig();
@@ -34,7 +35,15 @@ const edge = createEdgeTtsSynthesizer({
 });
 await edge.probe();
 
-const app = createApp({ config, edge });
+/**
+ * 中文合成的快路径：原生 WS。这里**不探测**——建连要等服务端 token 生效，
+ * 启动时白花一个握手没有意义；第一次真实请求就是探测，失败会自动降级到 CLI 并记住。
+ */
+const edgeWs = createEdgeWsClient({
+  log: (line) => console.log(line),
+});
+
+const app = createApp({ config, edge, edgeWs });
 
 /** ws → 它那条上游桥。close 时必须 delete，否则一次说话漏一条上游连接。 */
 const bridges = new Map<unknown, SttBridge>();

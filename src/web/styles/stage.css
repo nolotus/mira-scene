@@ -501,15 +501,89 @@
   background: linear-gradient(180deg, #3a2113, #180d07);
 }
 
+/*
+ * 桌面上的咖啡杯（`props: ["cup"]` 的实体 —— `hold_cup` 这个动作的取证依据）。
+ *
+ * 改前它是一个 33×34px、圆角 12%/26% 的浅色圆角方块：没有杯口、没有把手、没有杯垫、
+ * 没有接触阴影，在深色桌面上读作「贴上去的一张浅灰贴纸」（截图实测）。
+ * 这里按「锥形杯身 + 杯口椭圆 + 把手 + 杯垫 + 接触阴影」重画，颜色仍遵守场景光照：
+ * 左侧是窗外的冷光（--fill-color），右侧是吊灯的暖光（--key-color）。
+ * 尺寸仍随 .table 走百分比，所以三个咖啡馆场景与任意舞台尺寸都不用改数字。
+ */
+.table-saucer {
+  position: absolute;
+  top: 0.6%;
+  left: 53%;
+  width: 20%;
+  height: 3.4%;
+  border-radius: 50%;
+  background: radial-gradient(
+    closest-side,
+    rgba(224, 212, 190, 0.95),
+    rgba(126, 109, 88, 0.9) 72%,
+    rgba(58, 44, 31, 0.92) 100%
+  );
+  box-shadow: 0 3px 7px -3px rgba(0, 0, 0, 0.75);
+}
+
 .table-cup {
   position: absolute;
-  top: -14%;
-  left: 58%;
-  width: 12%;
-  height: 16%;
-  border-radius: 12% 12% 26% 26%;
-  background: linear-gradient(180deg, #f6f0e4, #cbbda7);
-  box-shadow: inset -3px 0 4px rgba(0, 0, 0, 0.15), 0 0 18px rgba(255, 205, 145, 0.35);
+  top: -13.5%;
+  left: 57%;
+  width: 11%;
+  height: 15%;
+  /* 锥形杯身：上口略收，杯底 22% 的大圆弧 —— 方角最容易读成「方块」 */
+  border-radius: 12% 12% 34% 34% / 8% 8% 24% 24%;
+  background: linear-gradient(
+    104deg,
+    #b9c4cc 0%,
+    #ded4c2 24%,
+    #d6c6ab 58%,
+    #9d8a74 100%
+  );
+  box-shadow:
+    /* 左：窗外冷光（fill-color） */
+    inset 2px 0 2px -1px color-mix(in srgb, var(--fill-color, #9ec6ec) 62%, transparent),
+    /* 右：吊灯暖光（key-color） */
+    inset -3px 0 3px -1px color-mix(in srgb, var(--key-color, #ffe6bd) 45%, transparent),
+    inset -4px 0 5px rgba(0, 0, 0, 0.26),
+    /* 与桌面接触处的暗部 */
+    0 5px 9px -4px rgba(0, 0, 0, 0.62);
+}
+
+/* 杯口：椭圆 + 深褐咖啡液面，让「这是个开口的杯子」一眼成立 */
+.table-cup::after {
+  content: "";
+  position: absolute;
+  left: -5%;
+  right: -5%;
+  top: -8%;
+  height: 26%;
+  border-radius: 50%;
+  background: radial-gradient(
+    closest-side,
+    #2c180d 0%,
+    #3a2313 50%,
+    #c4b295 54%,
+    #e6dccb 78%,
+    #f4efe6 100%
+  );
+  box-shadow: 0 1px 0 rgba(255, 225, 185, 0.32);
+}
+
+/* 把手：一个只留左半圈的椭圆环。用整圈 border 再裁掉右半，
+   否则「border-right: none」会渲染成两根横杠（实测就是这样，像插了两根筷子）。 */
+.table-cup::before {
+  content: "";
+  position: absolute;
+  left: -27%;
+  top: 19%;
+  width: 38%;
+  height: 48%;
+  border: 2px solid #c9bba5;
+  border-radius: 50%;
+  clip-path: inset(0 42% 0 0);
+  box-shadow: -1px 0 0 rgba(0, 0, 0, 0.22);
 }
 
 .steam {

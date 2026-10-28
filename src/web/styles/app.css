@@ -688,3 +688,473 @@ body {
     animation: none;
   }
 }
+
+/* ================================================================
+   底栏层级重构：主操作（输入 / 麦克风）· 情境操作（打断）· 溢出（⋯）
+   —— 8px 栅格；行间 10px；横向间距 ≥10px；所有可点元素 ≥44×44。
+   本节靠"后写覆盖"生效，不改上面的旧规则，便于逐条回滚。
+   ================================================================ */
+
+.mira-dock {
+  gap: 10px;
+  padding: 8px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+
+.mira-row {
+  gap: 10px;
+}
+
+/* 状态条：常显最多 2 个（超出的进 ⋯ 抽屉），不换行以免挤高底栏 */
+.mira-row--meta {
+  gap: 8px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.mira-row--input {
+  flex-wrap: nowrap;
+  gap: 10px;
+}
+
+.mira-input {
+  min-height: 44px;
+}
+
+.mira-btn {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.mira-btn--send {
+  min-width: 56px;
+}
+
+.mira-btn--tiny {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* 顶部提示条的关闭按钮：原来是全局最小触控目标（25×20.4），补到 44×44 */
+.mira-banner__action {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.mira-banner__close {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* 次行：靠右（拇指可及），不换行，间距 10px */
+.mira-row--actions {
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* 按住说话：独立的 44+ 按钮（不合并进麦克风，理由见 Dock.tsx 注释） */
+.mira-btn--ptt {
+  min-height: 44px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* 打断：只在角色说话时渲染（不是 visibility:hidden 占位），120ms 淡入 */
+.mira-dock__interrupt {
+  min-height: 44px;
+  animation: mira-interrupt-in 120ms ease-out both;
+}
+
+@keyframes mira-interrupt-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ⋯ 溢出按钮 */
+.mira-btn--more {
+  min-width: 44px;
+  min-height: 44px;
+  font-size: 18px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mira-btn__dot {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--mira-error);
+  box-shadow: 0 0 0 2px rgba(9, 11, 16, 0.85);
+}
+
+/* 麦克风主按钮：直径 56px 圆形，四态靠颜色 / 动效 / 图标分辨 */
+.mira-mic {
+  position: relative;
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--mira-line);
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--mira-ink);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.mira-mic__icon {
+  position: relative;
+  z-index: 1;
+}
+
+.mira-mic__ring {
+  position: absolute;
+  inset: -6px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  pointer-events: none;
+  opacity: 0;
+  transition: transform 0.08s linear, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.mira-mic--off {
+  color: var(--mira-ink-dim);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.mira-mic--off .mira-mic__icon {
+  opacity: 0.78;
+}
+
+.mira-mic--requesting {
+  color: var(--mira-warn);
+  border-color: rgba(255, 204, 102, 0.55);
+  background: rgba(255, 204, 102, 0.12);
+}
+
+.mira-mic--requesting .mira-mic__ring {
+  opacity: 1;
+  border-color: rgba(255, 204, 102, 0.55);
+  border-top-color: transparent;
+  border-right-color: transparent;
+  animation: mira-spin 900ms linear infinite;
+}
+
+.mira-mic--listening {
+  color: #0b0d12;
+  background: var(--mira-accent-2);
+  border-color: rgba(127, 200, 255, 0.75);
+  box-shadow: 0 0 0 1px rgba(127, 200, 255, 0.35), 0 6px 20px rgba(127, 200, 255, 0.28);
+}
+
+.mira-mic--listening .mira-mic__ring {
+  opacity: 1;
+  border-color: rgba(127, 200, 255, 0.55);
+  animation: mira-mic-pulse 1.6s ease-out infinite;
+}
+
+.mira-mic--blocked {
+  color: var(--mira-ink-dim);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+@keyframes mira-mic-pulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.85;
+  }
+  70% {
+    transform: scale(1.28);
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@keyframes mira-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 语音不可用：麦克风位置换成「打字优先」提示（换内容，不新增控件） */
+.mira-voice-hint {
+  margin: 0;
+  flex: 1 1 auto;
+  min-height: 44px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  text-align: right;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--mira-ink-dim);
+}
+
+.mira-voice-hint__lead {
+  color: var(--mira-ink);
+  font-size: 13px;
+}
+
+.mira-voice-hint__why {
+  opacity: 0.8;
+}
+
+/* ---------------- 底部抽屉（⋯） ---------------- */
+
+.mira-drawer-root {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+}
+
+.mira-drawer__scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 6, 10, 0.58);
+  backdrop-filter: blur(2px);
+  animation: mira-fade-in 140ms ease-out both;
+}
+
+.mira-drawer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 71;
+  display: flex;
+  flex-direction: column;
+  max-height: min(78vh, 640px);
+  padding: 6px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+  border-radius: 18px 18px 0 0;
+  border-top: 1px solid var(--mira-line);
+  background: linear-gradient(to bottom, rgba(20, 24, 33, 0.99), rgba(11, 13, 18, 0.99));
+  box-shadow: 0 -18px 40px rgba(0, 0, 0, 0.5);
+  animation: mira-drawer-in 180ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+  touch-action: pan-y;
+}
+
+@keyframes mira-drawer-in {
+  from {
+    transform: translateY(28px);
+    opacity: 0.6;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@keyframes mira-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.mira-drawer__grab {
+  cursor: grab;
+  touch-action: none;
+  padding-bottom: 6px;
+}
+
+.mira-drawer__handle {
+  display: block;
+  width: 40px;
+  height: 4px;
+  margin: 4px auto 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.mira-drawer__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.mira-drawer__heading {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mira-drawer__tip {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--mira-ink-dim);
+}
+
+.mira-drawer__dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--mira-error);
+}
+
+.mira-drawer__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px 2px 4px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.mira-drawer__foot {
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.mira-drawer__close {
+  width: 100%;
+  min-height: 44px;
+}
+
+.mira-drawer__section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mira-drawer__title {
+  font-size: 12px;
+  color: var(--mira-ink-dim);
+}
+
+.mira-drawer__text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--mira-ink);
+  opacity: 0.9;
+}
+
+.mira-drawer__btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--mira-line);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--mira-ink);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.mira-drawer__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mira-drawer__hint {
+  font-size: 11.5px;
+  color: var(--mira-ink-dim);
+}
+
+.mira-drawer__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mira-drawer .mira-diag {
+  border-top: none;
+  padding-top: 0;
+}
+
+.mira-drawer .mira-diag__summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mira-seg {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.mira-seg__opt {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 10px;
+  border: 1px solid var(--mira-line);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--mira-ink);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mira-seg__opt--on {
+  background: rgba(127, 200, 255, 0.18);
+  border-color: rgba(127, 200, 255, 0.55);
+  color: #d6ecff;
+}
+
+/* 窄屏：次行允许换行，但绝不横向滚动 */
+@media (max-width: 560px) {
+  .mira-row--actions {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 10px;
+  }
+
+  .mira-dock {
+    gap: 10px;
+    padding: 8px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (max-width: 380px) {
+  .mira-row--actions {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+
+  .mira-voice-hint {
+    flex-basis: 100%;
+    order: 9;
+    text-align: left;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mira-mic--listening .mira-mic__ring,
+  .mira-mic--requesting .mira-mic__ring,
+  .mira-dock__interrupt,
+  .mira-drawer {
+    animation: none;
+  }
+}

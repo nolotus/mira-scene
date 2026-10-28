@@ -95,7 +95,11 @@ function Row({
 /**
  * 截图 / 自查用的 URL 定点（仅 dev harness 使用）：
  *   /preview.html?nopanel&scene=cafe_closing&pose=hold_cup&emotion=warm
+ *   /preview.html?nopanel&char=photo&status=speaking&subtitle=雨好像不打算停了
  * 缺省值逐字段等于 INITIAL，所以不带参数时渲染结果与之前完全一致。
+ *
+ * `status` / `subtitle` 是给照片角色验收加的：口型由字幕驱动，
+ * 四状态必须能固定在同一 URL 上截图，否则每张图的状态都不由自己决定。
  */
 function seedFromUrl(): SceneState {
   if (typeof window === "undefined") return INITIAL;
@@ -109,6 +113,8 @@ function seedFromUrl(): SceneState {
     scene: pick("scene", SCENES, INITIAL.scene),
     pose: pick("pose", POSES, INITIAL.pose),
     emotion: pick("emotion", EMOTIONS, INITIAL.emotion),
+    characterStatus: pick("status", STATUSES, INITIAL.characterStatus),
+    subtitle: query.get("subtitle") ?? INITIAL.subtitle,
   };
 }
 

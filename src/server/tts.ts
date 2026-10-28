@@ -20,6 +20,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { EdgeWsError, type EdgeVoiceParams, type EdgeWsClient } from "./edgeTtsWs.ts";
 import type { EdgeTtsSynthesizer } from "./edgeTts.ts";
 
 /** 唯一支持的合成模型（英语） */
@@ -74,6 +75,23 @@ export type TtsResult =
   | { ok: true; bytes: Uint8Array; mime: string }
   | { ok: false; status: number; reason: TtsReason };
 
+/**
+ * 流式结果：`chunks` 一到就转发，不攒整块。
+ * `source` 只用于日志/诊断（客户端不看它）：
+ *  - `native` = 原生 WS（快路径）
+ *  - `cli`    = 回退到 `edge-tts` CLI（整句一次产出，所以只有一个分片）
+ *  - `cache`  = 命中整块缓存（同样只有一个分片）
+ *  - `buffer` = 上游只有整块接口（Deepgram），已经是整块拿到再一次吐出
+ *
+ * 注意契约：`ok: true` 返回时**第一块音频已经到手**。这样 `/api/tts?stream=1`
+ * 才能做到「先失败就回 JSON（沿用现有错误契约），已经开始转发就不再改状态码」。
+ */
+export type TtsStreamSource = "native" | "cli" | "cache" | "buffer";
+
+export type TtsStreamResult =
+  | { ok: true; mime: string; source: TtsStreamSource; chunks: AsyncIterable<Uint8Array> }
+  | { ok: false; status: number; reason: TtsReason };
+
 export interface TtsProxyOptions {
   config: TtsConfig | null;
   /** 测试注入；生产用全局 fetch */
@@ -86,6 +104,17 @@ export interface TtsProxyOptions {
 export interface TtsProxy {
   readonly configured: boolean;
   synthesize(raw: unknown): Promise<TtsResult>;
+  /** 可选：支持流式（只有路由层实现；Deepgram 代理不支持） */
+  synthesizeStream?(raw: unknown): Promise<TtsStreamResult>;
+  /** 可选：两条路的可用性（诊断用；不含任何凭据） */
+  readonly routes?: { english: boolean; chinese: boolean };
+  /** 可选：原生快路径状态（诊断区用） */
+  readonly native?: {
+    configured: boolean;
+    enabled: boolean;
+    offReason: string | null;
+    lastDrop: { reason: string; at: number } | null;
+  };
 }
 
 export function createTtsProxy(options: TtsProxyOptions): TtsProxy {
@@ -224,8 +253,14 @@ export function ttsCacheKey(voice: string, text: string): string {
 export interface TtsRouterOptions {
   /** 英文那一路：Deepgram Aura 代理（null = 没配 key） */
   deepgram: TtsProxy | null;
-  /** 中文那一路：Edge TTS（null = 没装 CLI / 显式关闭） */
+  /** 中文那一路的回退：`edge-tts` CLI（null = 没装 / 显式关闭） */
   edge: EdgeTtsSynthesizer | null;
+  /** 中文那一路的快路径：原生 WebSocket（null = 未启用） */
+  edgeWs?: EdgeWsClient | null;
+  /** 原生路径的 voice/rate/pitch；缺省取 `edge` 上的生效值（保证两级同音色） */
+  edgeVoice?: EdgeVoiceParams;
+  /** `cli` = 跳过原生；缺省看 `ETTS_MODE`（显式设成 `cli` 时同样跳过） */
+  mode?: "auto" | "cli";
   cache?: TtsCache;
   cacheEntries?: number;
   /** 只喂 voice / 字节数 / 耗时 / 命中与否，绝不喂文本 */
@@ -233,9 +268,18 @@ export interface TtsRouterOptions {
 }
 
 export interface TtsRouter extends TtsProxy {
+  /** 路由层一定实现流式（`TtsProxy` 上它是可选的，这里收紧成必选） */
+  synthesizeStream(raw: unknown): Promise<TtsStreamResult>;
   /** 两条路各自可用性（诊断用，不含任何凭据） */
   readonly routes: { english: boolean; chinese: boolean };
   readonly cache: TtsCache;
+  /** 原生快路径状态（诊断区用）：配了没、还在不在用、为什么关了 */
+  readonly native: {
+    configured: boolean;
+    enabled: boolean;
+    offReason: string | null;
+    lastDrop: { reason: string; at: number } | null;
+  };
 }
 
 /** `lang` 只做入参校验，不参与分流 —— 原因见 createTtsRouter 里的注释 */
@@ -245,6 +289,46 @@ function parseLang(raw: unknown): string | null {
   return trimmed && trimmed.length <= 16 ? trimmed : null;
 }
 
+async function* singleChunk(bytes: Uint8Array): AsyncGenerator<Uint8Array> {
+  yield bytes;
+}
+
+/** 原生路径：第一块已经拿到（`openNative` 保证），其余边收边吐 */
+async function* headThenRest(
+  first: Uint8Array,
+  rest: AsyncIterable<Uint8Array>,
+): AsyncGenerator<Uint8Array> {
+  yield first;
+  yield* rest;
+}
+
+async function joinChunks(chunks: AsyncIterable<Uint8Array>): Promise<Uint8Array> {
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  for await (const chunk of chunks) {
+    parts.push(chunk);
+    total += chunk.byteLength;
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+type TextCheck = { ok: true; text: string } | { ok: false; status: number; reason: TtsReason };
+
+function checkText(raw: unknown): TextCheck {
+  const record = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : null;
+  const text = record?.text;
+  if (typeof text !== "string") return { ok: false, status: 400, reason: "text-required" };
+  if (!text.trim()) return { ok: false, status: 400, reason: "text-required" };
+  if (text.length > MAX_TTS_CHARS) return { ok: false, status: 400, reason: "text-too-long" };
+  return { ok: true, text };
+}
+
 /**
  * `/api/tts` 的实现：按文本语言分流 + 共用一份字节缓存。
  *
@@ -252,35 +336,124 @@ function parseLang(raw: unknown): string | null {
  * 为什么不看客户端传的 `lang`：客户端 UI 语言默认是 `zh-CN`，用它来判会把纯英文句子
  * 也送进 Edge（双语混排时音色来回跳），而「英文走 Aura、中文走 Edge」是产品定死的。
  * 所以 `lang` 目前只被接受（并为将来预留）而不改变路由 —— 有单测钉住这一点。
+ *
+ * 中文三级链：**原生 WS → `edge-tts` CLI → `tts-unavailable`**。
+ *  - 原生失败（握手/令牌/6s 无音频/中途断流）→ 记下来，本进程内不再试原生，只用 CLI。
+ *    这是刻意的：令牌或网络坏了的时候，每句先白等一个握手比直接走 CLI 更糟。
+ *  - CLI 也失败才回 `tts-unavailable`（客户端据此回退浏览器 TTS）。
+ *  - 开关：`ETTS_MODE=cli`（或构造参数 `mode:"cli"`）直接跳过原生。
  */
 export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
   const cache = options.cache ?? createTtsCache(options.cacheEntries);
   const log = options.log ?? (() => {});
   const { deepgram, edge } = options;
+  const edgeWs = options.edgeWs ?? null;
+  const edgeVoice: EdgeVoiceParams | null =
+    options.edgeVoice ?? (edge ? { voice: edge.voice, rate: edge.rate, pitch: edge.pitch } : null);
+
+  const envMode = (process.env.ETTS_MODE ?? "").trim().toLowerCase();
+  const cliOnly = options.mode ? options.mode === "cli" : envMode === "cli";
+  let nativeOffReason: string | null = cliOnly ? "mode-cli" : edgeWs ? null : "not-configured";
+
+  const nativeEnabled = (): boolean => nativeOffReason === null && edgeWs !== null;
+
+  /** 首次失败即关掉原生（本进程内不再尝试）；`detail` 只带类别/时长，不带文本 */
+  function disableNative(reason: string, detail = ""): void {
+    if (nativeOffReason !== null) return;
+    nativeOffReason = reason;
+    log(`[tts] native=off reason=${reason}${detail} fallback=cli (本进程内不再尝试原生)`);
+  }
+
+  function edgeKey(): string | null {
+    if (!edge) return null;
+    // 缓存键必须含 rate/pitch：改了角色语速/音高还命中旧缓存，等于参数白改
+    return `edge:${edge.voice}:${edge.rate}:${edge.pitch}`;
+  }
+
+  function zhParams(): EdgeVoiceParams | null {
+    if (edgeVoice) return edgeVoice;
+    return edge ? { voice: edge.voice, rate: edge.rate, pitch: edge.pitch } : null;
+  }
+
+  interface NativeHead {
+    first: Uint8Array;
+    rest: AsyncGenerator<Uint8Array>;
+  }
+
+  /**
+   * 打开原生流并**取到第一块**：拿到才说明这条路真的能用。
+   * 失败返回 null（已记下原因、关掉原生），由调用方接着试 CLI。
+   */
+  async function openNative(text: string): Promise<NativeHead | null> {
+    const params = zhParams();
+    if (!nativeEnabled() || !edgeWs || !params) return null;
+    const started = performance.now();
+    const iterator = edgeWs.synthesizeStream(text, params);
+    try {
+      const head = await iterator.next();
+      const ms = Math.round(performance.now() - started);
+      if (head.done || !head.value || head.value.byteLength === 0) {
+        log(`[tts] route=zh native=empty ${ms}ms`);
+        disableNative("empty");
+        return null;
+      }
+      log(`[tts] route=zh native=first-chunk bytes=${head.value.byteLength} ${ms}ms`);
+      return { first: head.value, rest: iterator };
+    } catch (error) {
+      const kind = error instanceof EdgeWsError ? error.kind : "error";
+      const ms = Math.round(performance.now() - started);
+      log(`[tts] route=zh native=fail kind=${kind} ${ms}ms`);
+      disableNative(kind, ` ${ms}ms`);
+      return null;
+    }
+  }
+
+  /** CLI 那一步：整句一次产出，失败回 null（不在这里做日志分类，CLI 自己会记） */
+  async function runCli(text: string): Promise<Uint8Array | null> {
+    if (!edge || !edge.available) return null;
+    const result = await edge.synthesize(text);
+    return result.ok ? result.bytes : null;
+  }
 
   async function synthesizeEdge(text: string): Promise<TtsResult> {
-    if (!edge || !edge.available) {
+    const keyBase = edgeKey();
+    if (!keyBase) {
       log(`[tts] route=zh voice=none reason=tts-unavailable`);
       return { ok: false, status: 503, reason: "tts-unavailable" };
     }
-    // 缓存键必须含 rate/pitch：改了角色语速/音高还命中旧缓存，等于参数白改
-    const voice = edge.voice;
-    const key = ttsCacheKey(`edge:${voice}:${edge.rate}:${edge.pitch}`, text);
+    const key = ttsCacheKey(keyBase, text);
     const cached = cache.get(key);
     if (cached) {
-      log(`[tts] route=zh voice=${voice} bytes=${cached.bytes.byteLength} cache=hit`);
+      log(`[tts] route=zh voice=${edge?.voice} bytes=${cached.bytes.byteLength} cache=hit`);
       return { ok: true, bytes: cached.bytes, mime: cached.mime };
     }
+
     const started = performance.now();
-    const result = await edge.synthesize(text);
+    const native = await openNative(text);
+    if (native) {
+      try {
+        // 非流式调用方要的是整块：中途断流时**还没往客户端写任何东西**，所以可以整段回退 CLI
+        const bytes = await joinChunks(headThenRest(native.first, native.rest));
+        const ms = Math.round(performance.now() - started);
+        cache.set(key, { bytes, mime: "audio/mpeg" });
+        log(`[tts] route=zh voice=${edge?.voice} bytes=${bytes.byteLength} ${ms}ms native=yes cache=miss`);
+        return { ok: true, bytes, mime: "audio/mpeg" };
+      } catch (error) {
+        const kind = error instanceof EdgeWsError ? error.kind : "error";
+        log(`[tts] route=zh native=abort kind=${kind}`);
+        disableNative(kind, " mid-stream");
+      }
+    }
+
+    const cliBytes = await runCli(text);
     const ms = Math.round(performance.now() - started);
-    if (!result.ok) {
-      log(`[tts] route=zh voice=${voice} reason=${result.reason} ${ms}ms`);
+    if (!cliBytes) {
+      log(`[tts] route=zh voice=${edge?.voice} reason=tts-unavailable ${ms}ms`);
       return { ok: false, status: 503, reason: "tts-unavailable" };
     }
-    cache.set(key, { bytes: result.bytes, mime: result.mime });
-    log(`[tts] route=zh voice=${voice} bytes=${result.bytes.byteLength} ${ms}ms cache=miss`);
-    return { ok: true, bytes: result.bytes, mime: result.mime };
+    cache.set(key, { bytes: cliBytes, mime: "audio/mpeg" });
+    log(`[tts] route=zh voice=${edge?.voice} bytes=${cliBytes.byteLength} ${ms}ms native=no cache=miss`);
+    return { ok: true, bytes: cliBytes, mime: "audio/mpeg" };
   }
 
   async function synthesizeEnglish(text: string): Promise<TtsResult> {
@@ -299,28 +472,91 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
     return result;
   }
 
+  /**
+   * 流式（`?stream=1`）的中文链。返回 `ok` 时第一块已经在手，之后可以边收边转发。
+   *
+   * 缓存策略：**只读不写**。理由有两条，都不是偏好：
+   *  1. 写整块缓存就必须先把整句收完，那正好把「第一块先播」这件事毁掉；
+   *  2. 只缓存第一块没用 —— MP3 解码要连续数据，重放时后面几块还得现合成，
+   *     用户会在分片接缝处听到一个停顿，比从头合成还难受。
+   * 所以流式路径命中已有的整块缓存就直接一整块吐出去（最快），否则不落缓存。
+   */
+  async function streamEdge(text: string): Promise<TtsStreamResult> {
+    const keyBase = edgeKey();
+    if (!keyBase) {
+      log(`[tts] route=zh voice=none reason=tts-unavailable`);
+      return { ok: false, status: 503, reason: "tts-unavailable" };
+    }
+    const cached = cache.get(ttsCacheKey(keyBase, text));
+    if (cached) {
+      log(`[tts] route=zh stream=1 bytes=${cached.bytes.byteLength} cache=hit`);
+      return { ok: true, mime: cached.mime, source: "cache", chunks: singleChunk(cached.bytes) };
+    }
+
+    const native = await openNative(text);
+    if (native) {
+      return {
+        ok: true,
+        mime: "audio/mpeg",
+        source: "native",
+        chunks: headThenRest(native.first, native.rest),
+      };
+    }
+
+    const cliBytes = await runCli(text);
+    if (cliBytes) {
+      log(`[tts] route=zh stream=1 bytes=${cliBytes.byteLength} native=no cache=miss`);
+      return { ok: true, mime: "audio/mpeg", source: "cli", chunks: singleChunk(cliBytes) };
+    }
+    log(`[tts] route=zh voice=${edge?.voice} reason=tts-unavailable stream=1`);
+    return { ok: false, status: 503, reason: "tts-unavailable" };
+  }
+
   return {
     cache,
 
     get routes() {
-      return { english: deepgram?.configured === true, chinese: edge?.available === true };
+      return {
+        english: deepgram?.configured === true,
+        // 原生可用也算「中文这一路可用」：CLI 没装但 WS 能用，中文照样不该退浏览器
+        chinese: edge?.available === true || edgeWs !== null,
+      };
+    },
+
+    get native() {
+      return {
+        configured: edgeWs !== null,
+        enabled: nativeEnabled(),
+        offReason: nativeOffReason,
+        lastDrop: edgeWs?.stats.lastDrop ?? null,
+      };
     },
 
     get configured() {
-      return deepgram?.configured === true || edge?.available === true;
+      return deepgram?.configured === true || edge?.available === true || edgeWs !== null;
     },
 
     async synthesize(raw: unknown): Promise<TtsResult> {
+      const check = checkText(raw);
+      if (!check.ok) return { ok: false, status: check.status, reason: check.reason };
       const record = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : null;
-      const text = record?.text;
-      if (typeof text !== "string") return { ok: false, status: 400, reason: "text-required" };
-      if (!text.trim()) return { ok: false, status: 400, reason: "text-required" };
-      if (text.length > MAX_TTS_CHARS) return { ok: false, status: 400, reason: "text-too-long" };
       // 只为「格式不对的请求被挡住」而解析，不参与分流
       const lang = parseLang(record?.lang);
-      const routed = containsCjk(text) ? "zh" : "en";
-      log(`[tts] route=${routed} lang=${lang ?? "-"} chars=${text.length}`);
-      return routed === "zh" ? synthesizeEdge(text) : synthesizeEnglish(text);
+      const routed = containsCjk(check.text) ? "zh" : "en";
+      log(`[tts] route=${routed} lang=${lang ?? "-"} chars=${check.text.length}`);
+      return routed === "zh" ? synthesizeEdge(check.text) : synthesizeEnglish(check.text);
+    },
+
+    async synthesizeStream(raw: unknown): Promise<TtsStreamResult> {
+      const check = checkText(raw);
+      if (!check.ok) return { ok: false, status: check.status, reason: check.reason };
+      const routed = containsCjk(check.text) ? "zh" : "en";
+      if (routed === "zh") return streamEdge(check.text);
+      // 英文那一路（Deepgram）没有流式接口：仍然是整块拿到再一次吐出。
+      // 不是「假装流式」—— `chunks` 只有一个分片，客户端拿到的时序与不带 stream 一样。
+      const result = await synthesizeEnglish(check.text);
+      if (!result.ok) return { ok: false, status: result.status, reason: result.reason };
+      return { ok: true, mime: result.mime, source: "buffer", chunks: singleChunk(result.bytes) };
     },
   };
 }

@@ -9,10 +9,14 @@
  *   · 底部 <div id="dock" /> 留给上层注入文字与语音入口，本组件不渲染任何交互逻辑。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
 import type { StageProps } from "../../shared/protocol";
+import { describePresence, type Presence } from "../state/presence";
 import { Character } from "./Character";
+import { PhotoCharacter } from "./characters/PhotoCharacter";
+import { parseCharFlag } from "./characters/portraitRuntime";
+import { prefetchLine, prefetchSnapshot, startPrefetchAfterLoad, subscribePrefetch } from "./preload";
 import { ClipPlayer } from "./clip/ClipPlayer";
 import { Cues } from "./Cues";
 import { IllustrationLayer } from "./illustration/IllustrationLayer";
@@ -35,13 +39,49 @@ function useTrigger(key: string): { key: string; n: number } {
   return token;
 }
 
-export function Stage({ state, onBranchPick }: StageProps) {
+export function Stage({
+  state,
+  onBranchPick,
+  presence,
+  presenceDebug,
+}: StageProps & {
+  /**
+   * 在场状态（只读消费）：渲染层不推导它，只照着画。
+   * 缺省（未接线 / preview 页）时口型退回原行为，三条像素验收路径不受影响。
+   */
+  presence?: Presence;
+  /** `?trace=1`：HUD 多一行 `在场状态：speaking ← tts:playing`，用于对拍与录屏取证 */
+  presenceDebug?: boolean;
+}) {
   const camera = useTrigger(state.camera ?? "none");
   const beat = useTrigger(state.lastBeat ?? "");
   const action = useTrigger(state.pendingActions.join(" "));
 
+  /**
+   * `?char=photo` 才启用照片级角色；不写这个参数走的就是原来那条 SVG 路径
+   * （三场景像素验收依赖这一点：默认分支多渲染一个字节都不允许）。
+   */
+  const charMode = useMemo(
+    () => parseCharFlag(typeof window === "undefined" ? "" : window.location.search).mode,
+    [],
+  );
+
   const tone = state.lastBeat ? toneOf(state.lastBeat) : 0;
   const hasSubtitle = state.subtitle.trim().length > 0;
+
+  /**
+   * 素材预取：load 之后 300ms（或空闲回调）才启动，省流模式整轮跳过。
+   * 失败只记诊断，不阻塞任何渲染 —— 首帧永远不等它。
+   */
+  const prefetch = useSyncExternalStore(subscribePrefetch, prefetchSnapshot, prefetchSnapshot);
+  useEffect(() => {
+    startPrefetchAfterLoad();
+  }, []);
+  /** `?trace=1`：把预取时间线放到 HUD 上，截图脚本与录屏都能直接读到 */
+  const trace = useMemo(
+    () => (typeof window === "undefined" ? false : new URLSearchParams(window.location.search).get("trace") === "1"),
+    [],
+  );
 
   return (
     <div
@@ -49,6 +89,7 @@ export function Stage({ state, onBranchPick }: StageProps) {
       data-scene={state.scene}
       data-emotion={state.emotion}
       data-status={state.characterStatus}
+      data-presence={presence?.status ?? undefined}
       data-pose={state.pose}
     >
       <div className="stage-canvas" style={vars(vfxVars(state.vfx))}>
@@ -59,7 +100,15 @@ export function Stage({ state, onBranchPick }: StageProps) {
           style={vars(sceneVars(specOf(state.scene)))}
         >
           <StageBackdrop scene={state.scene} />
-          <Character state={state} actionNonce={action.n} />
+          {charMode === "photo" ? (
+            <PhotoCharacter
+              state={state}
+              actionNonce={action.n}
+              mouthDrive={presence?.mouthDrive}
+            />
+          ) : (
+            <Character state={state} actionNonce={action.n} mouthDrive={presence?.mouthDrive} />
+          )}
           {/* 由对话触发的显著视觉事件：每次 lastBeat 变化重播一次 */}
           <div className="stage-beat" key={`beat-${beat.n}`} data-tone={tone} aria-hidden="true">
             <span className="beat-sweep" />
@@ -77,6 +126,25 @@ export function Stage({ state, onBranchPick }: StageProps) {
           <span className="hud-dot" />
           <span className="hud-name">Mira</span>
           <span className="hud-state">{STATUS_LABEL[state.characterStatus]}</span>
+          {presenceDebug && presence ? (
+            <span
+              className="hud-state"
+              data-presence-reason={presence.reason}
+              style={{ opacity: 0.62 }}
+            >
+              {`在场状态：${describePresence(presence)}`}
+            </span>
+          ) : null}
+          {trace ? (
+            <span
+              className="hud-state"
+              data-prefetch={prefetch.skipped ? "skipped" : prefetch.entries.map((e) => `${e.name}:${e.state}`).join(",")}
+              data-prefetch-started-at={prefetch.scheduledAt ?? ""}
+              style={{ opacity: 0.62 }}
+            >
+              {prefetchLine(prefetch)}
+            </span>
+          ) : null}
         </header>
 
         <div className="stage-ui">

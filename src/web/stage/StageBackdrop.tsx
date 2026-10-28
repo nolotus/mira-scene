@@ -206,6 +206,7 @@ export const PLANE_RENDERERS: Partial<Record<PlaneId, (spec: SceneSpec) => React
       <div className="table">
         <span className="table-top" />
         <span className="table-leg" />
+        <span className="table-saucer" />
         <span className="table-cup" />
       </div>
       <div className="steam">

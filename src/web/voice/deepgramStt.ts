@@ -35,6 +35,15 @@ import {
   type SttLang,
   type SttOptions,
 } from "./stt.ts";
+import type { AecState } from "./bargeInGate.ts";
+import { markTrace } from "./bargeInTrace.ts";
+import {
+  aecStateOf,
+  bargeInAudioConstraints,
+  readAppliedMicSettings,
+  reportAppliedMicSettings,
+  type AppliedMicSettings,
+} from "./micConstraints.ts";
 
 /** MediaRecorder 的切片间隔：100ms 是实测的粒度（越小越碎、越大延迟越高） */
 export const CHUNK_MS = 100;
@@ -47,6 +56,9 @@ export const RECORDER_MIME = "audio/webm;codecs=opus";
  */
 export const FINISH_UTTERANCE = JSON.stringify({ type: "finish_utterance" });
 
+/** 预建连队列上限：1.5s。超出丢最旧帧并计入 `prerollDropped`（见 diagnostics） */
+export const PRE_ROLL_MAX_CHUNKS = Math.ceil(1500 / CHUNK_MS);
+
 export type SttChannelOf = "deepgram" | "webspeech" | "none";
 
 export interface DeepgramSttDiagnostics {
@@ -55,6 +67,24 @@ export interface DeepgramSttDiagnostics {
   reason: string | null;
   /** 预热状态：connecting 期间上层可以显示「语音通道连接中」 */
   prewarm: "idle" | "connecting" | "ready" | "failed";
+  /**
+   * 麦克风轨道**实际生效**的回声消除状态（`track.getSettings().echoCancellation`）。
+   * 为什么单独一个字段：`getUserMedia` 的约束只是「请求」，浏览器可以静默忽略；
+   * 自动打断的唯一硬前提就是它 —— 拿不到 true 就不能把麦克风里的声音当成用户。
+   * 还没开始采集时是 `unknown`。
+   */
+  aec: AecState;
+  /** 实际生效的采集设置（诊断区/报告用；null = 还没取流） */
+  micSettings: AppliedMicSettings | null;
+  /**
+   * 握手窗口里攒下、并在 WS 就绪后**补发**的音频帧数。
+   * 为什么必须有这个计数：`prewarm()` 建连实测约 1s，用户很可能在指纹里就开口了。
+   * 旧实现把这段音频直接丢掉 → Deepgram 手里没有那段声音 → `speech_started` 永远不来，
+   * 而 trace 上看起来只是「上游没发」，根本查不到是本地丢的（真机踩过一次）。
+   */
+  prerollFlushed: number;
+  /** 预建连队列溢出被丢的最旧帧数（上限 ≈1.5s；>0 说明用户开口太早，需要说「再说一次」） */
+  prerollDropped: number;
 }
 
 // ---------------------------------------------------------------- 浏览器最小接口
@@ -70,6 +100,8 @@ export interface VoiceSocketLike {
 
 export interface MediaStreamLike {
   getTracks(): Array<{ stop(): void }>;
+  /** 读实际生效的采集设置（AEC 实测）用；测试替身可以不给 */
+  getAudioTracks?(): Array<{ getSettings?(): unknown }>;
 }
 
 export interface RecorderLike {
@@ -157,6 +189,14 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
   let finishPending = false;
   /** recorder 是否**原生**带 stop 事件（必须在挂回调之前判断，否则自己的赋值会把它变成 true） */
   let recorderHasStopEvent = false;
+  /**
+   * 握手窗口的音频预滚队列（≈1.5s = 15 个 100ms 帧）。
+   * 上限存在的理由：宁可丢最旧的帧（并在 `prerollDropped` 里计数），也不让内存无限涨；
+   * 15 帧覆盖建连实测的 ~1s，再多就不是「握手慢」而是网络出问题了。
+   */
+  const preRoll: Array<string | Blob | ArrayBufferLike | ArrayBufferView> = [];
+  let preRollFlushed = 0;
+  let preRollDropped = 0;
 
   /** 告诉服务端「这句说完了」：冲 final，但**不关 WS**（连接还要给下一句用） */
   function sendFinishUtterance(): void {
@@ -186,6 +226,10 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
     channel: "none",
     reason: null,
     prewarm: "idle",
+    aec: "unknown",
+    micSettings: null,
+    prerollFlushed: 0,
+    prerollDropped: 0,
   };
 
   // 初始通道：Deepgram 能用就用它；否则**真的试一次** Web Speech（supported=false 的兜底
@@ -238,6 +282,8 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
     const current = socket;
     socket = null;
     socketReady = false;
+    // 旧连接的预滚帧不许灌进新连接（那是上一段的音频，灌进去会让上游判出幽灵语音）
+    preRoll.length = 0;
     if (!current) return;
     // 先摘回调：主动关自己时不该再走一遍「上游断了」的分支
     current.onopen = null;
@@ -309,6 +355,10 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
       return;
     }
     if (type === "speech_started") {
+      // 这条标记的作用：把「上游有没有发」和「App 有没有接」分开。
+      // 下次真机 trace 里如果只有 speech-started 而没有 stt:speech_started，问题在上游；
+      // 反过来则是 App 侧接线断了。
+      markTrace("stt:speech_started", "upstream");
       options.onSpeechStarted?.();
       return;
     }
@@ -335,7 +385,24 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
     created.onopen = () => {
       if (socket !== created || disposed) return;
       socketReady = true;
-      setDiag({ prewarm: "ready" });
+      // 握手期间攒下的音频按序补发：这一段往往正是「用户开口」的那句
+      const queued = preRoll.length;
+      if (queued > 0) {
+        for (const frame of preRoll) {
+          try {
+            created.send(frame);
+          } catch {
+            preRoll.length = 0;
+            switchToFallback("ws-send-failed");
+            return;
+          }
+        }
+        preRoll.length = 0;
+        preRollFlushed += queued;
+        markTrace("stt:preroll-flush", `flushed=${preRollFlushed}`);
+        log(`[stt] preroll flushed=${queued} dropped=${preRollDropped}`);
+      }
+      setDiag({ prewarm: "ready", prerollFlushed: preRollFlushed, prerollDropped: preRollDropped });
       log("[stt] ws ready");
     };
     created.onmessage = (event) => {
@@ -359,13 +426,20 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
     if (disposed || diagnostics.channel !== "deepgram") return false;
     let captured: MediaStreamLike;
     try {
-      captured = await getMic({ audio: true });
+      // 回声消除 / 降噪 / 自动增益：语音打断的硬前提（不开 AEC，麦克风会收到角色自己的声音）
+      captured = await getMic({ audio: bargeInAudioConstraints() });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       options.onError?.(`拿不到麦克风：${message}`, "denied");
       return false;
     }
     stream = captured;
+    // 实测生效设置：约束只是「请求」，浏览器可以静默忽略 → 必须回读 track.getSettings()
+    {
+      const settings = readAppliedMicSettings(captured);
+      reportAppliedMicSettings(settings);
+      setDiag({ micSettings: settings, aec: aecStateOf(settings) });
+    }
     try {
       const created = makeRecorder(captured);
       // 先探能力、再挂回调：这一步反了，「有没有 stop 事件」就永远为真
@@ -373,7 +447,17 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
       created.ondataavailable = (event) => {
         const data = event?.data;
         if (!data) return;
-        if (!socketReady || !socket) return;
+        if (!socket || !socketReady) {
+          // 握手还没完成：**不能丢**（用户很可能此刻就在说话）。进有界队列，open 后按序补发。
+          preRoll.push(data);
+          if (preRoll.length > PRE_ROLL_MAX_CHUNKS) {
+            preRoll.shift();
+            preRollDropped += 1;
+            setDiag({ prerollDropped: preRollDropped });
+            markTrace("stt:preroll-drop", `dropped=${preRollDropped}`);
+          }
+          return;
+        }
         try {
           socket.send(data);
         } catch {

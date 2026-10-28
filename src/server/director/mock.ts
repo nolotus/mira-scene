@@ -15,7 +15,15 @@
  *    台词按 2–6 字分片，片间 40–70ms；台词与 Directive 交织产出，画面跟着话走。
  *    signal 中止后立刻停止产出（每个 await 之后都会检查）。
  */
-import type { Directive, Director, DirectorInput, SessionEvent } from "../../shared/protocol.ts";
+import type {
+  AnchoredCue,
+  Directive,
+  Director,
+  DirectorInput,
+  SessionEvent,
+  SpokenPlan,
+} from "../../shared/protocol.ts";
+import { CueScheduler, charCount } from "./cues.ts";
 import { chunkText, delayFor, sleep } from "./stream-utils.ts";
 
 /** 一步演出：要么说一句话（会被切成小片），要么丢一条视觉指令 */
@@ -34,7 +42,14 @@ interface MockBeat {
   priority: number;
   /** 整场对话只演一次（防止闪电放三次） */
   once?: boolean;
+  /** 旧写法：say 步与指令步按顺序交织（指令立即执行，没有 atChar） */
   steps: MockStep[];
+  /**
+   * 时序写法：指令锚定到「整段台词的第几个字符」（= 该 beat 所有 say 步拼起来的字符位置）。
+   * 有 cues 的 beat 走 CueScheduler：说到 atChar 那一刻才把指令投递出去，
+   * 于是「闪电」不会抢在「刚才那一下——」前面劈下来。
+   */
+  cues?: AnchoredCue[];
 }
 
 export interface MockDirectorOptions {
@@ -70,16 +85,20 @@ const BEATS: readonly MockBeat[] = [
     match: /雨|雷|闪电|湿|下大|storm|rain/i,
     priority: 90,
     once: true,
+    // 时序写法示范 ①：闪电在「刚才那一下——」说完之后（atChar=7），
+    // 雨势与镜头抖动在「雨又大了。」之后（atChar=18）—— 画面跟着话走，不是抢在话前面。
     steps: [
-      action("shiver"),
-      vfx("lightning"),
       say("刚才那一下——"),
       say("你看见了吗。"),
-      vfx("rain_heavy"),
-      camera("shake"),
       say("雨又大了。"),
       say("这种天气，他应该会更迟吧。"),
-      pose("glance_window"),
+    ],
+    cues: [
+      { atChar: 0, directive: { kind: "action", action: "shiver" } },
+      { atChar: 7, directive: { kind: "vfx", vfx: "lightning" } },
+      { atChar: 18, directive: { kind: "vfx", vfx: "rain_heavy" } },
+      { atChar: 18, directive: { kind: "camera", move: "shake" } },
+      { atChar: 31, directive: { kind: "pose", pose: "glance_window" } },
     ],
   },
   // —— 用户替她担心：最容易被戳到的点 ——
@@ -89,15 +108,19 @@ const BEATS: readonly MockBeat[] = [
     minPhase: 2,
     priority: 88,
     once: true,
+    // 时序写法示范 ②：惊跳与镜头抖动在开口之前（atChar=0），
+    // 情绪掉下去在「别这么说。」之后（atChar=7），侧身避开在「我知道这样不正常。」之后（atChar=16）。
     steps: [
-      action("startle"),
-      camera("shake"),
-      emotion("anxious"),
       say("别。"),
       say("别这么说。"),
       say("我知道这样不正常。"),
-      pose("turn_away"),
       say("可我一走，就真的等不到了。"),
+    ],
+    cues: [
+      { atChar: 0, directive: { kind: "action", action: "startle" } },
+      { atChar: 0, directive: { kind: "camera", move: "shake" } },
+      { atChar: 7, directive: { kind: "emotion", emotion: "anxious" } },
+      { atChar: 16, directive: { kind: "pose", pose: "turn_away" } },
     ],
   },
   // —— 题目点名的：问「等谁」→ 侧身 + 望窗 ——
@@ -418,29 +441,76 @@ export class MockDirector implements Director {
     const scale = this.#delayScale;
     let chunkIndex = 0;
 
+    // 时序写法（beat.cues）：台词先合成一把尺子，指令按 atChar 落在字幕的字符位置上
+    const plan: SpokenPlan | null = beat.cues
+      ? {
+          say: beat.steps.map((step) => (step.kind === "say" ? step.text : "")).join(""),
+          cues: beat.cues,
+        }
+      : null;
+    const scheduler = plan ? new CueScheduler(plan.cues, { sayLength: charCount(plan.say) }) : null;
+    let spoken = 0;
+
+    const cueEvent = (cue: AnchoredCue): SessionEvent => ({
+      type: "directive",
+      turnId: input.turnId,
+      epoch: input.epoch,
+      directive: cue.directive,
+      atChar: cue.atChar,
+    });
+    // 场景切换/灯光变化给足呼吸，普通姿势指令快一些
+    const holdOf = (directive: Directive): number => (directive.kind === "scene" ? 240 : 55);
+
     // 开场给一小段「正在想」的停顿，紧接着第一个视觉指令就会到
     await sleep(Math.round(80 * scale), signal);
     if (signal.aborted) return;
+
+    // atChar = 0 的指令：开口之前就变（与旧行为一致，只是现在明确标了位置）
+    if (scheduler) {
+      for (const cue of scheduler.advance(0)) {
+        if (signal.aborted) return;
+        yield cueEvent(cue);
+        await sleep(Math.round(holdOf(cue.directive) * scale), signal);
+      }
+    }
 
     for (const step of beat.steps) {
       if (signal.aborted) return;
 
       if (step.kind === "directive") {
         yield { type: "directive", turnId: input.turnId, epoch: input.epoch, directive: step.directive };
-        // 场景切换/灯光变化给足呼吸，普通姿势指令快一些
-        const hold = step.directive.kind === "scene" ? 240 : 55;
-        await sleep(Math.round(hold * scale), signal);
+        await sleep(Math.round(holdOf(step.directive) * scale), signal);
         continue;
       }
 
       for (const piece of chunkText(step.text)) {
         if (signal.aborted) return;
         yield { type: "text.delta", turnId: input.turnId, epoch: input.epoch, text: piece };
-        await sleep(delayFor(chunkIndex, scale), signal);
+        spoken += charCount(piece);
         chunkIndex += 1;
+
+        // 说完这一片后，越过 atChar 的指令立刻放 —— 「说到第 N 个字符时画面变」
+        if (scheduler) {
+          for (const cue of scheduler.advance(spoken)) {
+            if (signal.aborted) return;
+            yield cueEvent(cue);
+            await sleep(Math.round(holdOf(cue.directive) * scale), signal);
+          }
+        }
+
+        await sleep(delayFor(chunkIndex - 1, scale), signal);
       }
       // 句子之间的呼吸
       await sleep(Math.round(110 * scale), signal);
+    }
+
+    // 收尾：atChar 落在末字之后/越界的 cue（例如结尾的 branch）不丢
+    if (scheduler) {
+      for (const cue of scheduler.takeAll()) {
+        if (signal.aborted) return;
+        yield cueEvent(cue);
+        await sleep(Math.round(holdOf(cue.directive) * scale), signal);
+      }
     }
   }
 }

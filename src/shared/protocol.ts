@@ -85,6 +85,30 @@ export type Directive =
   | { kind: "scene"; scene: SceneVariant }
   | { kind: "branch"; options: Branch[] };
 
+// ------------------------------------------------------- 时序指令（cue）
+
+/**
+ * 一条带时序的指令：atChar 表示「说到第几个字符时触发」（按 say 的字符数，0 起）。
+ *
+ * 为什么需要它：原来的协议只有「一轮 = 一组指令」，服务端只能把整组指令一次丢给客户端，
+ * 于是视觉总是抢在台词前面（模型还没说完「刚才那一下」，闪电就已经劈完了）。
+ * 把指令锚到 say 的字符位置之后，指令与台词就有共同的时间轴：
+ *   · atChar = 0        → 开口之前就变（等价于旧行为「立即执行」）
+ *   · atChar = N        → 说到第 N 个字符那一刻才变
+ * 客户端可以用 `cuesUpTo()` / `CueScheduler`（src/server/director/cues.ts，纯函数、无 Node 依赖）
+ * 按已播字数自己调度；不调度也不会错乱，服务端在能确定的场合已经按字符边界投递。
+ */
+export interface AnchoredCue {
+  atChar: number;
+  directive: Directive;
+}
+
+/** 导演产出的「这一轮要说什么 + 什么时候变画面」 */
+export interface SpokenPlan {
+  say: string;
+  cues: AnchoredCue[];
+}
+
 /** 角色在画面上的状态（题目要求：待机、倾听、思考、说话） */
 export type CharacterStatus = "idle" | "listening" | "thinking" | "speaking";
 
@@ -93,7 +117,18 @@ export type CharacterStatus = "idle" | "listening" | "thinking" | "speaking";
 export type SessionEvent =
   | { type: "turn.start"; turnId: string; epoch: number; at: number }
   | { type: "text.delta"; turnId: string; epoch: number; text: string }
-  | { type: "directive"; turnId: string; epoch: number; directive: Directive }
+  | {
+      type: "directive";
+      turnId: string;
+      epoch: number;
+      directive: Directive;
+      /**
+       * 可选：这条指令锚在 say 的第几个字符（0 起）。
+       * 缺省 = 「立即执行」，与旧协议完全一致（不认识的客户端忽略此字段即可）；
+       * 有值 = 客户端可以等到「已播字数 ≥ atChar」再执行，也可以立即执行（服务端已按边界投递）。
+       */
+      atChar?: number;
+    }
   /** 音频分片：dataUrl 为 base64 编码的音频；Mock 模式不产生此事件（改用浏览器 TTS） */
   | {
       type: "audio.chunk";

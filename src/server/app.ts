@@ -34,6 +34,7 @@ import {
 } from "./stt.ts";
 import { createEdgeTtsSynthesizer, type EdgeTtsSynthesizer } from "./edgeTts.ts";
 import { createTtsProxy, createTtsRouter, type TtsProxy } from "./tts.ts";
+import type { EdgeWsClient } from "./edgeTtsWs.ts";
 
 /**
  * /api/voice/status 的响应体。
@@ -46,6 +47,12 @@ export interface VoiceStatus {
   tts: boolean;
   sttModel: string;
   ttsZh: boolean;
+  /**
+   * 原生快路径的状态（诊断区用）：`enabled=false` 时 `offReason` 说明为什么
+   * （`mode-cli` / `timeout` / `auth` / `request-failed` …），`lastDrop` 是最近一次弃连原因。
+   * 没有这一路时该字段不出现 —— 旧客户端读到的 JSON 与改造前一致。
+   */
+  ttsNative?: { enabled: boolean; offReason: string | null; lastDrop: string | null };
 }
 
 export interface AppOptions {
@@ -67,6 +74,8 @@ export interface AppOptions {
   edge?: EdgeTtsSynthesizer;
   /** 上游 STT 建连函数（测试注入假 socket；默认连 wss://api.deepgram.com） */
   sttConnect?: UpstreamConnect;
+  /** 中文的快路径：原生 WS（默认不建 —— 建连由 index.ts 显式做，测试里可以注入假实现） */
+  edgeWs?: EdgeWsClient;
 }
 
 export interface App {
@@ -149,18 +158,34 @@ export function createApp(options: AppOptions = {}): App {
         log: () => {},
       }),
       edge,
+      edgeWs: options.edgeWs ?? null,
       cacheEntries: config.edgeTts.cacheEntries,
     });
   /**
    * 每次现算：`ttsZh` 取决于探测结果，而探测在 createApp 之后才可能落定
    * （index.ts 先 await probe 再建 app；测试里注入 stub 直接给结论）。
    */
-  const voiceStatus = (): VoiceStatus => ({
-    stt: deepgram !== null,
-    tts: tts.configured,
-    sttModel: STT_MODEL,
-    ttsZh: edge.available,
-  });
+  const voiceStatus = (): VoiceStatus => {
+    const native = tts.native ?? null;
+    const base: VoiceStatus = {
+      stt: deepgram !== null,
+      tts: tts.configured,
+      sttModel: STT_MODEL,
+      // 中文可用 = CLI 探到了 或者 原生 WS 配了（两者任一都能出声）
+      ttsZh: tts.routes?.chinese ?? edge.available,
+    };
+    // 没有原生那一路时**整个字段不出现**：旧客户端拿到的 JSON 与改造前逐字节一致
+    return native
+      ? {
+          ...base,
+          ttsNative: {
+            enabled: native.enabled,
+            offReason: native.offReason,
+            lastDrop: native.lastDrop?.reason ?? null,
+          },
+        }
+      : base;
+  };
 
   const sttConnect: UpstreamConnect =
     options.sttConnect ??
@@ -257,7 +282,23 @@ export function createApp(options: AppOptions = {}): App {
     // 失败回 { reason }，客户端据此回退 BrowserTTS（不会让用户听到废音）。
     if (path === "/api/tts") {
       if (request.method !== "POST") return json({ error: "method not allowed" }, 405, origin);
-      const result = await tts.synthesize(await safeJson(request));
+      const body = await safeJson(request);
+      // 流式只在**显式要**的时候才走：不带 stream 的请求一个字节都不变（既有客户端不受影响）
+      if (wantsStreamedAudio(url, request.headers) && tts.synthesizeStream) {
+        const streamed = await tts.synthesizeStream(body);
+        // 还没开始转发就失败：沿用原来的 JSON 契约（客户端照样能读 reason 回退）
+        if (!streamed.ok) return json({ reason: streamed.reason }, streamed.status, origin);
+        return new Response(chunksToStream(streamed.chunks), {
+          status: 200,
+          headers: {
+            "content-type": streamed.mime,
+            // 没有 content-length → 走 chunked；Bun 会自动加 transfer-encoding
+            "cache-control": "no-store",
+            ...corsFor(origin),
+          },
+        });
+      }
+      const result = await tts.synthesize(body);
       if (!result.ok) return json({ reason: result.reason }, result.status, origin);
       return new Response(result.bytes.slice().buffer, {
         status: 200,
@@ -557,6 +598,45 @@ function parseHistory(raw: unknown): Array<{ role: "user" | "character"; text: s
     history.push({ role, text: text.slice(0, 2000) });
   }
   return history;
+}
+
+/**
+ * 只有**显式**要流式才流式：
+ *  - `?stream=1`
+ *  - `Accept: audio/mpeg`（浏览器 `fetch` 默认发 `*\/*`，不会命中，所以既有客户端行为不变）
+ * 不按「有没有 Accept 头」猜：猜错会让老客户端拿到 chunked 响应，虽然能播但会丢掉 content-length。
+ */
+function wantsStreamedAudio(url: URL, headers: Headers): boolean {
+  if (url.searchParams.get("stream") === "1") return true;
+  const accept = (headers.get("accept") ?? "").toLowerCase();
+  return accept.split(",").some((part) => part.trim().startsWith("audio/mpeg"));
+}
+
+/**
+ * 异步迭代器 → `ReadableStream`：拿一块写一块，不攒整句。
+ * 迭代器在转发中途抛错时 `controller.error()` —— 此时状态码已经发出去了，
+ * 客户端会看到短读/连接中断（它已经播了收到的部分）。这条路径只在 native 中途断流时走到。
+ */
+function chunksToStream(chunks: AsyncIterable<Uint8Array>): ReadableStream<Uint8Array> {
+  const iterator = chunks[Symbol.asyncIterator]();
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await iterator.next();
+        if (next.done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(next.value);
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    async cancel() {
+      // 客户端断开：把生成器收掉（它会释放连接名额/丢弃 WS 连接）
+      await iterator.return?.(undefined);
+    },
+  });
 }
 
 async function safeJson(request: Request): Promise<unknown> {

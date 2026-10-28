@@ -212,16 +212,18 @@ describe("DeepgramStt 预热", () => {
 });
 
 describe("DeepgramStt 数据与事件", () => {
-  test("录音帧原样推给 WS；socket 未 open 前不丢也不乱发", async () => {
+  test("录音帧原样推给 WS；未 open 前的帧进 pre-roll，open 后按序补发", async () => {
     const h = harness();
     const stt = createDeepgramStt(h.options);
     stt.start();
     await flush();
     h.recorder.chunk();
-    expect(h.socket.sent).toHaveLength(0); // 还没 open
+    expect(h.socket.sent).toHaveLength(0); // 还没 open：进队列，不发（也不丢）
     h.socket.open();
-    h.recorder.chunk();
+    // open 后立刻补发握手窗口攒下的帧（旧实现直接丢弃 → Deepgram 收不到用户第一句）
     expect(h.socket.sent).toHaveLength(1);
+    h.recorder.chunk();
+    expect(h.socket.sent).toHaveLength(2);
     stt.abort();
   });
 

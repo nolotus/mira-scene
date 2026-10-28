@@ -22,6 +22,12 @@ export interface CharacterProps {
   state: SceneState;
   /** 每当 pendingActions 变化时自增：用作一次性动作的 key，强制重播 */
   actionNonce: number;
+  /**
+   * 是否允许驱动口型（由在场状态仲裁器给出）。
+   * 缺省 true = 保持原行为（preview 页 / 未接线的调用方）：只要状态是 speaking 就动嘴。
+   * 接线后只有「TTS 真的在播」才为 true —— 没有声音的时候嘴不该动。
+   */
+  mouthDrive?: boolean;
 }
 
 // ---------------------------------------------------------------- 骨架参数表
@@ -155,7 +161,7 @@ function useBlink(): { name: string; ms: number } {
   return { name: `${twice ? "blinkTwice" : "blinkOnce"}${suffix}`, ms: twice ? 430 : 300 };
 }
 
-export function Character({ state, actionNonce }: CharacterProps) {
+export function Character({ state, actionNonce, mouthDrive = true }: CharacterProps) {
   const pose = POSE_SPEC[state.pose];
   const status = STATUS_SPEC[state.characterStatus];
   const emo = EMOTION_SPEC[state.emotion];
@@ -169,7 +175,7 @@ export function Character({ state, actionNonce }: CharacterProps) {
   const lighting = specOf(state.scene).lighting;
 
   const primary = state.pendingActions[0];
-  const lip = useMouthPhase(state.subtitle, state.characterStatus === "speaking");
+  const lip = useMouthPhase(state.subtitle, state.characterStatus === "speaking" && mouthDrive);
   const blink = useBlink();
 
   // 侧身补偿：躯干转了 turn，头要把脸「转回来」——宽度还原 + 反向偏转，避免整个人斜着平移

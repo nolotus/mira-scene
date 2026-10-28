@@ -157,12 +157,13 @@ describe("Directive → SceneState", () => {
     expect(scene.scene).toBe("window_rain");
     expect(scene.camera).toBe("push_in");
     expect(scene.vfx.lightning).toBe(1);
-    expect(scene.pendingActions).toEqual(["blink", "sigh"]);
+    // 动作队列改按优先级排序（见 session.ts 的 ACTION_PRIORITY）：sigh(2) 排在背景动作 blink(0) 之前
+    expect(scene.pendingActions).toEqual(["sigh", "blink"]);
     expect(scene.branches.map((b) => b.id)).toEqual(["stay", "go"]);
     expect(scene.lastBeat).toBe("t1#branch:stay|go");
 
     const { scene: drained, actions } = drainActions(scene);
-    expect(actions).toEqual(["blink", "sigh"]);
+    expect(actions).toEqual(["sigh", "blink"]);
     expect(drained.pendingActions).toEqual([]);
     // 消费一次之后是空操作，不会重复触发动作
     expect(drainActions(drained).actions).toEqual([]);

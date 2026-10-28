@@ -2,18 +2,45 @@
  * LiveDirector —— 真模型导演（DeepSeek 直连，OpenAI 兼容 /chat/completions）。
  *
  * 关键设计：
- * 1. **结构化输出**：请求带 `response_format: {"type": "json_object"}`，模型只能吐
- *    `{"say": "...", "directives": [...]}`，省掉「从自由文本里抠指令」这件不稳的事。
- * 2. **仍然是流式**：开 `stream: true`，边收边从 JSON 里增量解析 `say` 字段的字符串值
- *    （处理转义与半截 token），到客户端仍是 2–6 字的小片；directives 在 JSON 尾部，收完再发。
- * 3. **不信任模型输出**：`directives` 全部过 validateDirective 白名单，非法值静默丢弃。
- * 4. 上游失败/超时 → 发一条 error{recoverable:true} 后正常结束，绝不 hang。
+ * 1. **结构化输出**：`MIRA_LLM_STRUCT` 决定用哪种约束（见 struct-probe.ts）：
+ *    auto 先探一次端点支不支持 `json_schema`，支持就用严格 schema，否则退回 `json_object`。
+ * 2. **时序指令**：模型输出 `{"cues":[{"atChar":N,"d":{...}}],"say":"..."}` —— cues 在前、
+ *    短键 `d` 省 token。cues 在前不是为了好看：服务端要能在台词**开播之前**拿到 atChar，
+ *    这样「说到第 N 个字符」的指令才能在那一瞬间投递出去，而不是等 JSON 尾巴补发。
+ *    旧格式 `{"say","directives":[]}` 全兼容：转成 atChar 均为 0 的 cues（= 立即执行）。
+ * 3. **仍然是流式**：开 `stream: true`，边收边从 JSON 里增量解析 `say` 的字符串值
+ *    （处理转义与半截 token），到客户端仍是 2–6 字的小片；cues 用 CueScanner 边收边扫。
+ * 4. **不信任模型输出**：atChar 必须有限、夹紧；指令过 validateDirective 白名单；
+ *    非法项逐条丢弃并计数（`lastStats` 诊断可见），绝不打断整轮。
+ * 5. 上游失败/超时 → 发一条 error{recoverable:true} 后正常结束，绝不 hang。
  *
  * 密钥纪律：apiKey 只用于拼 Authorization 头，不写日志、不进错误消息、不落盘。
  */
-import type { Directive, Director, DirectorInput, SessionEvent } from "../../shared/protocol.ts";
+import type {
+  AnchoredCue,
+  Directive,
+  Director,
+  DirectorInput,
+  SessionEvent,
+} from "../../shared/protocol.ts";
+import type { LlmMode, LlmStructMode } from "../config.ts";
 import { LLM_DEFAULTS } from "../config.ts";
 import { DIRECTIVE_VOCAB, validateDirectives } from "../scene/validate.ts";
+import {
+  CueScheduler,
+  CueScanner,
+  charCount,
+  cueFromDirective,
+  readRawCue,
+  sortCues,
+  clampCues,
+} from "./cues.ts";
+import {
+  jsonObjectResponseFormat,
+  jsonSchemaResponseFormat,
+  resolveStructuredOutput,
+  type StructuredOutputDecision,
+} from "./struct-probe.ts";
 import { chunkText, sleep } from "./stream-utils.ts";
 
 export interface LiveDirectorOptions {
@@ -28,6 +55,14 @@ export interface LiveDirectorOptions {
   maxTokens?: number;
   /** 上游无响应超时（毫秒）：超时按可恢复错误收尾，而不是让 SSE 挂着 */
   timeoutMs?: number;
+  /** 结构化输出档位（默认 auto；由 config 的 MIRA_LLM_STRUCT 决定） */
+  struct?: LlmStructMode;
+  /** 调用模式（默认 chat；tool 目前只有配置位，未实现） */
+  mode?: LlmMode;
+  /** 测试注入用（探针与对话共用）；默认全局 fetch */
+  fetchImpl?: typeof fetch;
+  /** 探针超时（毫秒），默认 4s */
+  probeTimeoutMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 20_000;
@@ -39,20 +74,23 @@ const SYSTEM_PROMPT = `你是 Mira，26 岁的旅行摄影师。琥珀色雨衣�
 你说话：中文、短句、克制、偶尔自嘲，不解释自己的处境太多，会岔开话题。
 
 输出格式（严格遵守）：只输出一个 JSON 对象，不要 Markdown、不要代码围栏、不要任何解释文字。
-{"say": "你要说出口的台词", "directives": [ {"kind": "emotion", "emotion": "warm"} ]}
+{"cues": [{"atChar": 0, "d": {"kind": "emotion", "emotion": "warm"}}], "say": "你要说出口的台词"}
 
 规则：
 1. say：中文口语，2–4 句，总共不超过 90 个字；不写旁白（不要「她低下头」这种描述）。
-2. directives：可以为空数组 []。只有真的需要改动画面时才放，不要每轮都放。
-3. 指令可用取值（只能用这些，kind 与字段名必须完全一致）：
+2. cues：可以为空数组 []。atChar 表示「说到 say 的第几个字符时」触发（0 起，按字符数；
+   0 = 开口之前）。把动作放在它对应的那句话之后，而不是全部堆在开头：
+   例：say="刚才那一下——你看见了吗。" 时，闪电写 atChar=6（「刚才那一下——」说完）。
+   一定要先写 cues，再写 say（顺序会影响投递时机）。
+3. d 是指令本体，可用取值（只能用这些，kind 与字段名必须完全一致）：
    {"kind":"emotion","emotion":${JSON.stringify(DIRECTIVE_VOCAB.emotion)}}
    {"kind":"pose","pose":${JSON.stringify(DIRECTIVE_VOCAB.pose)}}
    {"kind":"action","action":${JSON.stringify(DIRECTIVE_VOCAB.action)}}
    {"kind":"camera","move":${JSON.stringify(DIRECTIVE_VOCAB.camera)}}
    {"kind":"vfx","vfx":${JSON.stringify(DIRECTIVE_VOCAB.vfx)}}
    {"kind":"scene","scene":${JSON.stringify(DIRECTIVE_VOCAB.scene)}}
-4. 需要让玩家做选择时加一条：
-   {"kind":"branch","options":[{"id":"stay","label":"陪你一起等"},{"id":"call","label":"我帮你打个电话"}]}
+4. 需要让玩家做选择时加一条 cue，atChar 放在台词末尾：
+   {"atChar": <say 的字符数>, "d": {"kind":"branch","options":[{"id":"stay","label":"陪你一起等"},{"id":"call","label":"我帮你打个电话"}]}}
 5. 不要重复已经演过的显著画面（闪电、灯暗这类一场对话只放一次）。`;
 
 interface ChatMessage {
@@ -60,9 +98,23 @@ interface ChatMessage {
   content: string;
 }
 
+/** 解析结果：新格式带 cues，旧格式的 directives 会被转成 atChar=0 的 cues */
 export interface DirectorPayload {
   say: string;
+  /** 兼容字段：扁平指令列表（按 atChar 排序，等价于 cues.map(c => c.directive)） */
   directives: Directive[];
+  /** 带时序的指令（已排序、已夹到 [0, say.length]） */
+  cues: AnchoredCue[];
+  /** 诊断：被丢弃的条数（atChar 非法 / 指令非法） */
+  dropped: { atChar: number; directive: number };
+}
+
+/** 一轮的解析统计（诊断可见：谁被丢了、为什么、用的哪种结构化输出） */
+export interface LiveTurnStats {
+  cues: number;
+  droppedAtChar: number;
+  droppedDirective: number;
+  struct: StructuredOutputDecision | null;
 }
 
 export class LiveDirector implements Director {
@@ -74,6 +126,16 @@ export class LiveDirector implements Director {
   readonly #temperature: number;
   readonly #maxTokens: number;
   readonly #timeoutMs: number;
+  readonly #struct: LlmStructMode;
+  readonly #mode: LlmMode;
+  readonly #fetch: typeof fetch;
+  readonly #probeTimeoutMs: number | undefined;
+  #lastStats: LiveTurnStats = {
+    cues: 0,
+    droppedAtChar: 0,
+    droppedDirective: 0,
+    struct: null,
+  };
 
   constructor(options: LiveDirectorOptions) {
     this.#apiKey = options.apiKey;
@@ -83,11 +145,43 @@ export class LiveDirector implements Director {
     this.#temperature = options.temperature ?? 0.8;
     this.#maxTokens = options.maxTokens ?? 320;
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#struct = options.struct ?? "auto";
+    this.#mode = options.mode ?? "chat";
+    this.#fetch = options.fetchImpl ?? fetch;
+    this.#probeTimeoutMs = options.probeTimeoutMs;
     // 名字会出现在 SessionInfo.directorName 里，只放 provider 标签
     this.name = `live-${options.label ?? "openai-compatible"}`;
   }
 
+  /** 最近一轮的解析/能力统计（诊断页或测试读取；不含密钥与响应体） */
+  get lastStats(): LiveTurnStats {
+    return this.#lastStats;
+  }
+
+  /** 选结构化输出档位：auto 时这里会触发一次探测（进程内缓存，只探一次） */
+  async resolveStructDecision(): Promise<StructuredOutputDecision> {
+    return resolveStructuredOutput({
+      mode: this.#struct,
+      provider: { baseUrl: this.#baseUrl, model: this.#model, apiKey: this.#apiKey, extraHeaders: this.#extraHeaders },
+      fetchImpl: this.#fetch,
+      timeoutMs: this.#probeTimeoutMs,
+    });
+  }
+
   async *stream(input: DirectorInput, signal: AbortSignal): AsyncIterable<SessionEvent> {
+    // tool calling 只留配置位：明确报「未实现」，不写半成品分支
+    if (this.#mode === "tool") {
+      yield this.#failure(
+        input,
+        "MIRA_LLM_MODE=tool 尚未实现：本版本只支持 chat + 结构化输出（json_schema / json_object）",
+      );
+      return;
+    }
+
+    const decision = await this.resolveStructDecision();
+    if (signal.aborted) return;
+    this.#lastStats = { cues: 0, droppedAtChar: 0, droppedDirective: 0, struct: decision };
+
     const controller = new AbortController();
     const forwardAbort = (): void => controller.abort();
     signal.addEventListener("abort", forwardAbort, { once: true });
@@ -103,7 +197,7 @@ export class LiveDirector implements Director {
     try {
       let response: Response;
       try {
-        response = await fetch(`${this.#baseUrl}/chat/completions`, {
+        response = await this.#fetch(`${this.#baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
             "content-type": "application/json",
@@ -116,8 +210,9 @@ export class LiveDirector implements Director {
             stream: true,
             temperature: this.#temperature,
             max_tokens: this.#maxTokens,
-            // 强制结构化输出：模型只能吐 {"say","directives"} 形状的 JSON
-            response_format: { type: "json_object" },
+            // 结构化输出：json_schema（端点支持时）或 json_object（保底）
+            response_format:
+              decision.strategy === "json_schema" ? jsonSchemaResponseFormat() : jsonObjectResponseFormat(),
           }),
           signal: controller.signal,
         });
@@ -138,10 +233,14 @@ export class LiveDirector implements Director {
       reader = response.body.getReader();
       const decoder = new TextDecoder();
       const extractor = new SayExtractor();
+      const scanner = new CueScanner();
+      // cues 在 JSON 里的出现顺序未必严格（模型不一定守规矩），调度器负责按 atChar 重排
+      const scheduler = new CueScheduler([], {});
       let lineBuffer = "";
       let rawAll = "";
       let pending = "";
       let emitted = "";
+      let spoken = 0;
       let doneSeen = false;
 
       while (!doneSeen) {
@@ -162,6 +261,9 @@ export class LiveDirector implements Director {
           }
 
           rawAll += content;
+          // cues 是 JSON 前缀：先扫它，台词开播前就有 atChar 可用
+          scheduler.feed(scanner.push(content));
+
           // 从 JSON 里增量抠出 say 的字符串值，边到边播
           pending += extractor.push(content);
           const ready = splitReady(pending);
@@ -169,7 +271,12 @@ export class LiveDirector implements Director {
 
           for (const piece of ready.pieces) {
             if (signal.aborted) return;
+            // 片前先放「已经越过」的指令：说到第 N 个字符时，画面就在这一刻变
+            for (const cue of scheduler.advance(spoken)) {
+              yield this.#cueEvent(input, cue);
+            }
             emitted += piece;
+            spoken += charCount(piece);
             yield { type: "text.delta", turnId: input.turnId, epoch: input.epoch, text: piece };
             await sleep(LIVE_CHUNK_DELAY_MS, signal);
           }
@@ -178,22 +285,37 @@ export class LiveDirector implements Director {
 
       if (signal.aborted) return;
 
-      // ---- 收尾：补完台词 → 再发结构化指令（JSON 里 directives 在 say 之后）----
+      // ---- 收尾：补完台词 → 再补在后面才扫到的 cues ----
       const payload = parseDirectorPayload(rawAll);
       const remainder = remainderOf(payload, emitted) || pending;
 
       for (const piece of chunkText(remainder)) {
         if (signal.aborted) return;
         emitted += piece;
+        spoken += charCount(piece);
         yield { type: "text.delta", turnId: input.turnId, epoch: input.epoch, text: piece };
         await sleep(LIVE_CHUNK_DELAY_MS, signal);
       }
 
       if (payload) {
-        for (const directive of payload.directives) {
+        // 扫描器已经放出去的那批不重复；剩下的（旧格式 directives / 尾巴才到的 cues）在这里补
+        scheduler.feed(payload.cues.slice(Math.max(0, scanner.cues.length)));
+        for (const cue of scheduler.advance(spoken)) {
           if (signal.aborted) return;
-          yield { type: "directive", turnId: input.turnId, epoch: input.epoch, directive };
+          yield this.#cueEvent(input, cue);
         }
+        for (const cue of scheduler.takeAll()) {
+          if (signal.aborted) return;
+          yield this.#cueEvent(input, cue);
+        }
+
+        const scanned = scanner.stats;
+        this.#lastStats = {
+          cues: payload.cues.length,
+          droppedAtChar: Math.max(payload.dropped.atChar, scanned.droppedAtChar),
+          droppedDirective: Math.max(payload.dropped.directive, scanned.droppedDirective),
+          struct: decision,
+        };
       } else if (!emitted) {
         yield this.#failure(input, "上游返回的内容无法解析为 JSON");
       }
@@ -211,6 +333,17 @@ export class LiveDirector implements Director {
         }
       }
     }
+  }
+
+  /** 指令事件：带上 atChar，客户端不认这个字段也不会坏（旧行为 = 立即执行） */
+  #cueEvent(input: DirectorInput, cue: AnchoredCue): SessionEvent {
+    return {
+      type: "directive",
+      turnId: input.turnId,
+      epoch: input.epoch,
+      directive: cue.directive,
+      atChar: cue.atChar,
+    };
   }
 
   #buildMessages(input: DirectorInput): ChatMessage[] {
@@ -322,7 +455,14 @@ export function splitReady(text: string): { pieces: string[]; rest: string } {
   return { pieces, rest: "" };
 }
 
-/** 解析完整 JSON 输出；容忍代码围栏与前后多余文字 */
+/**
+ * 解析完整 JSON 输出；容忍代码围栏与前后多余文字。
+ *
+ * 两种形状都吃：
+ *   新：{"cues":[{"atChar":6,"d":{...}}, ...],"say":"..."}
+ *   旧：{"say":"...","directives":[{...}]}  →  每条转成 atChar=0 的 cue（立即执行）
+ * 非法的 atChar / 指令逐条丢弃并计数，say 保留 —— 一条脏数据不该毁掉整轮。
+ */
 export function parseDirectorPayload(raw: string): DirectorPayload | null {
   const cleaned = raw.replace(/```[a-zA-Z]*\n?/g, "").trim();
   const start = cleaned.indexOf("{");
@@ -340,10 +480,35 @@ export function parseDirectorPayload(raw: string): DirectorPayload | null {
   const record = parsed as Record<string, unknown>;
   const say =
     typeof record.say === "string" ? record.say : typeof record.text === "string" ? record.text : "";
+  const sayText = say.trim();
+  const sayLength = charCount(sayText);
+
+  const dropped = { atChar: 0, directive: 0 };
+  const rawCues = Array.isArray(record.cues) ? record.cues : null;
+
+  let cues: AnchoredCue[] = [];
+  if (rawCues) {
+    for (const item of rawCues) {
+      const read = readRawCue(item);
+      if (read.cue) cues.push(read.cue);
+      else if (read.dropped === "atChar") dropped.atChar += 1;
+      else dropped.directive += 1;
+    }
+  } else {
+    // 旧格式：白名单校验（非法项在这里丢掉，不会流到渲染层），atChar 一律 0
+    const legacy = validateDirectives(record.directives);
+    const rawLegacy = Array.isArray(record.directives) ? record.directives.length : 0;
+    dropped.directive += Math.max(0, rawLegacy - legacy.length);
+    cues = legacy.map(cueFromDirective);
+  }
+
+  cues = sortCues(clampCues(cues, sayLength));
+
   return {
-    say: say.trim(),
-    // 白名单校验：非法指令在这里被丢掉，不会流到渲染层
-    directives: validateDirectives(record.directives),
+    say: sayText,
+    directives: cues.map((cue) => cue.directive),
+    cues,
+    dropped,
   };
 }
 

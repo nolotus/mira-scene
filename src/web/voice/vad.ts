@@ -20,6 +20,11 @@ import {
   type SpeechGuardDecision,
   type SpeechGuardStats,
 } from "../state/bargeIn";
+import {
+  bargeInAudioConstraints,
+  readAppliedMicSettings,
+  reportAppliedMicSettings,
+} from "./micConstraints";
 
 /** 角色是否在出声，以及「从开口到现在多久」 */
 export interface SpeakingSnapshot {
@@ -422,8 +427,11 @@ export class MicEnergyVad implements VadController {
 
     try {
       this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
+        // 与 STT 采集用同一套约束（AEC 是自动打断的硬前提，见 voice/micConstraints.ts）
+        audio: bargeInAudioConstraints(),
       });
+      // 实测回读：没开成 AEC 时上层必须知道（否则回声会当成用户开口）
+      reportAppliedMicSettings(readAppliedMicSettings(this.stream));
     } catch (err) {
       const message =
         err instanceof Error && err.name === "NotAllowedError"

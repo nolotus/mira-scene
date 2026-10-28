@@ -29,14 +29,15 @@ describe("describeMicAvailability", () => {
     expect(describeMicAvailability({ ...HEALTHY, mic: "listening" })).toBeNull();
   });
 
-  test("非安全上下文：说清是 http 的锅，并指向 localhost / 文字输入 / 按住说话", () => {
+  test("非安全上下文：说清是 http 的锅，并指向 localhost / 文字输入 / 打断键", () => {
     const notice = describeMicAvailability({ ...HEALTHY, secureContext: false });
     expect(notice?.kind).toBe("insecure");
     expect(notice?.title).toContain("安全上下文");
     expect(notice?.reason).toContain("https");
     expect(notice?.actions.join(" ")).toContain("localhost");
     expect(notice?.actions.join(" ")).toContain("打字");
-    expect(notice?.actions.join(" ")).toContain("按住说话");
+    // 底栏层级重构后：非安全上下文收起全部语音入口（含按住说话），替代的是 Esc / 打断按钮
+    expect(notice?.actions.join(" ")).toContain("Esc");
   });
 
   test("非安全上下文优先于 denied（根因先讲，否则用户会去改一个没用的权限设置）", () => {
@@ -53,7 +54,7 @@ describe("describeMicAvailability", () => {
     const notice = describeMicAvailability({ ...HEALTHY, speechSupported: false });
     expect(notice?.kind).toBe("unsupported");
     expect(notice?.title).toContain("不支持语音识别");
-    expect(notice?.actions.join(" ")).toContain("按住说话");
+    expect(notice?.actions.join(" ")).toContain("已收起语音入口");
     expect(notice?.primaryAction).toBe("去打字");
   });
 

@@ -20,6 +20,38 @@ import { DEFAULT_TTS_CACHE_ENTRIES } from "./tts.ts";
 
 export type LlmProviderId = "deepseek" | "custom";
 
+/**
+ * 结构化输出的档位（`MIRA_LLM_STRUCT`）：
+ *   · auto        —— 默认。首次调用前探测一次端点是否支持 json_schema，结果缓存（进程内）
+ *   · json_schema —— 直接用严格 schema（假定端点支持；探测失败/不确定都别选它）
+ *   · json_object —— 只用 `{"type":"json_object"}` + 解析层兜底（DeepSeek 当前的支持度）
+ * 探测不会用真实对话内容，只看状态码，也不打印响应体（里面可能有 token 计数之外的脏东西）。
+ */
+export type LlmStructMode = "auto" | "json_object" | "json_schema";
+
+/**
+ * 调用模式（`MIRA_LLM_MODE`）：
+ *   · chat —— 默认，/chat/completions + 结构化输出
+ *   · tool —— tool calling。**未实现**：本版本只留配置位，选到它时导演会明确回
+ *             "未实现" 的可恢复错误，而不是走半成品分支假装能用。
+ */
+export type LlmMode = "chat" | "tool";
+
+const LLM_STRUCT_MODES: readonly LlmStructMode[] = ["auto", "json_object", "json_schema"];
+const LLM_MODES: readonly LlmMode[] = ["chat", "tool"];
+
+/** 解析 `MIRA_LLM_STRUCT`：未设置/拼错 → auto（默认） */
+export function resolveLlmStructMode(env: Record<string, string | undefined>): LlmStructMode {
+  const raw = (env.MIRA_LLM_STRUCT ?? "").trim().toLowerCase();
+  return (LLM_STRUCT_MODES as readonly string[]).includes(raw) ? (raw as LlmStructMode) : "auto";
+}
+
+/** 解析 `MIRA_LLM_MODE`：未设置/拼错 → chat */
+export function resolveLlmMode(env: Record<string, string | undefined>): LlmMode {
+  const raw = (env.MIRA_LLM_MODE ?? "").trim().toLowerCase();
+  return (LLM_MODES as readonly string[]).includes(raw) ? (raw as LlmMode) : "chat";
+}
+
 export interface LlmProvider {
   id: LlmProviderId;
   baseUrl: string;
@@ -90,6 +122,10 @@ export interface ServerConfig {
   llm: LlmProvider | null;
   /** Mock 台词节奏缩放：1 = 真实节奏，0 = 不停顿（测试用） */
   mockDelayScale: number;
+  /** 结构化输出档位（`MIRA_LLM_STRUCT`，默认 auto = 首次调用前探测一次） */
+  llmStruct: LlmStructMode;
+  /** 调用模式（`MIRA_LLM_MODE`，默认 chat；tool 只有配置位，未实现） */
+  llmMode: LlmMode;
   /** 开发模式放行 CORS 的前端源 */
   devOrigins: readonly string[];
 }
@@ -196,6 +232,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     directorMode: defaults.mode,
     llm,
     mockDelayScale: toScale(env.MOCK_DELAY_SCALE),
+    llmStruct: resolveLlmStructMode(env),
+    llmMode: resolveLlmMode(env),
     devOrigins: ["http://localhost:5173", "http://127.0.0.1:5173"],
   };
 }

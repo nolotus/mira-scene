@@ -639,6 +639,95 @@ export type SpeakRequestResult =
   | { ok: true; bytes: ArrayBuffer }
   | { ok: false; reason: string };
 
+/**
+ * 流式合成的一个分片流。`ok` 时 `chunks` 边到边吐 MP3 字节。
+ *
+ * 为什么要有这一层：中文的整句合成要等 1.5s+ 才有第一个字节，而一句话的开头
+ * 通常几百毫秒就出来了。拿到第一块就开始播，才能把「等待」变成「已经在说」。
+ */
+export type SpeakStreamResult =
+  | { ok: true; chunks: AsyncIterable<Uint8Array> }
+  | { ok: false; reason: string };
+
+export type SpeakStream = (text: string) => Promise<SpeakStreamResult>;
+
+/**
+ * 入队前的最小聚合字节数。
+ *
+ * Edge 的 `Path:audio` 分片**不对齐 MPEG 帧边界**，直接把每一片丢给 `decodeAudioData`
+ * 会在分片尾部丢掉半个帧；片越小越明显。聚到 ~1KB 再入队，代价是首个可播单位晚
+ * 约 40–80ms（48kbps 下 1KB ≈ 170ms 音频里的一小段缓冲），换的是稳定的解码。
+ */
+export const MIN_AUDIO_CHUNK_BYTES = 1024;
+
+export function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const block = 0x8000;
+  for (let i = 0; i < bytes.length; i += block) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + block));
+  }
+  return btoa(binary);
+}
+
+function mergeBytes(parts: Uint8Array[]): Uint8Array {
+  let total = 0;
+  for (const part of parts) total += part.byteLength;
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.byteLength;
+  }
+  return out;
+}
+
+async function* readBody(body: ReadableStream<Uint8Array>): AsyncGenerator<Uint8Array> {
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (value && value.byteLength > 0) yield value;
+    }
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* 已经被取消 */
+    }
+  }
+}
+
+/**
+ * 默认实现：`POST /api/tts?stream=1`，读 `ReadableStream`。
+ * 失败（非 2xx / 没有 body）只回 reason —— 调用方据此对这一句回退本机音。
+ */
+export function createSpeakStream(fetcher: typeof fetch = fetch): SpeakStream {
+  return async (text) => {
+    try {
+      const res = await fetcher("/api/tts?stream=1", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) {
+        let reason = `status-${res.status}`;
+        try {
+          const payload = (await res.json()) as { reason?: string };
+          if (typeof payload?.reason === "string" && payload.reason) reason = payload.reason;
+        } catch {
+          /* body 不是 JSON：保留状态码 */
+        }
+        return { ok: false, reason };
+      }
+      if (!res.body) return { ok: false, reason: "no-body" };
+      return { ok: true, chunks: readBody(res.body) };
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : "network" };
+    }
+  };
+}
+
 export type SpeakRequest = (text: string) => Promise<SpeakRequestResult>;
 
 /** 默认实现：POST /api/tts 拿 MP3。失败只回 reason（服务端的 400/502 原因码）。 */
@@ -674,6 +763,12 @@ export interface RoutedTtsOptions {
   getStatus?: () => TtsCapability | null;
   speakRequest?: SpeakRequest;
   /**
+   * 流式合成（首块即播）。**显式传 `null` 可以关掉**：
+   * 注入了 `speakRequest`（测试的假实现）而没有传 `speakStream` 时默认关掉，
+   * 这样既有的整块路径测试不受影响；生产不传任何东西 → 默认开启流式。
+   */
+  speakStream?: SpeakStream | null;
+  /**
    * 第一次用上「本机合成音」时回调一次（诊断区用它说明「非角色音色」）。
    * 只在首句触发，不打断对话、不弹窗。
    */
@@ -690,10 +785,15 @@ interface SynthJob {
   tier: "edge" | "deepgram";
 }
 
-interface SynthOutcome {
-  ok: boolean;
-  bytes?: ArrayBuffer;
-  reason: string;
+/** 一句话的流式交付状态 */
+interface JobState {
+  job: SynthJob;
+  /** 已到手、还没送进播放器的 dataURL（按到达顺序） */
+  chunks: string[];
+  /** 这句的合成是否已经结束（成功或失败） */
+  done: boolean;
+  /** 失败原因（没有拿到任何音频时才有值） */
+  failed: string | null;
 }
 
 /**
@@ -716,12 +816,14 @@ export class RoutedTTS implements TTSProvider {
   private synthOrder = 0;
   /** 下一个「按序交付」的序号：乱序先完成的结果在这里等前一句 */
   private synthHead = 0;
-  private readonly synthReady = new Map<number, { job: SynthJob; outcome: SynthOutcome }>();
+  /** 按句序排好的交付状态：分片先进各自队列，只有「队首」允许立刻入播放器 */
+  private readonly jobs = new Map<number, JobState>();
   private browserNoticeSent = false;
   private readonly lang: string;
   private readonly onSegment: ((text: string) => void) | null;
   private readonly getStatus: () => TtsCapability | null;
   private readonly speakRequest: SpeakRequest;
+  private readonly speakStream: SpeakStream | null;
   private readonly onBrowserFallback: ((reason: string) => void) | null;
 
   constructor(options: RoutedTtsOptions = {}) {
@@ -729,6 +831,12 @@ export class RoutedTTS implements TTSProvider {
     this.onSegment = options.onSegment ?? null;
     this.getStatus = options.getStatus ?? (() => null);
     this.speakRequest = options.speakRequest ?? createSpeakRequest();
+    this.speakStream =
+      options.speakStream === undefined
+        ? options.speakRequest
+          ? null // 注入了整块实现（测试）：不擅自切到流式
+          : createSpeakStream()
+        : options.speakStream;
     this.onBrowserFallback = options.onBrowserFallback ?? null;
   }
 
@@ -751,7 +859,7 @@ export class RoutedTTS implements TTSProvider {
       (this.browser?.isSpeaking ?? false) ||
       (this.stream?.isSpeaking ?? false) ||
       this.synthInflight > 0 ||
-      this.synthReady.size > 0
+      this.jobs.size > 0
     );
   }
 
@@ -786,7 +894,7 @@ export class RoutedTTS implements TTSProvider {
     // 流水线整体作废：队列清空，在飞的结果因 generation 不符被丢弃
     this.synthQueue.length = 0;
     this.synthInflight = 0;
-    this.synthReady.clear();
+    this.jobs.clear();
     this.synthHead = this.synthOrder;
     this.browserNoticeSent = false;
     this.browser?.cancel();
@@ -830,48 +938,103 @@ export class RoutedTTS implements TTSProvider {
     }
   }
 
+  /**
+   * 跑一句话。两条路：
+   *  - 有 `speakStream` → 边收边交给 `drain()`（队首那句收到第一块就能出声）；
+   *  - 只有整块实现 → 老行为（拿到整块再入队）。
+   * 无论哪条，**入播放器的顺序只由 `synthHead` 决定**，所以 2 槽预取的乱序完成
+   * 不会打乱播放与字幕的同步。
+   */
   private async runSynth(job: SynthJob): Promise<void> {
     const generation = this.generation;
-    let outcome: SynthOutcome;
+    const state: JobState = { job, chunks: [], done: false, failed: null };
+    this.jobs.set(job.order, state);
     try {
-      const result = await this.speakRequest(job.text);
-      outcome = result.ok
-        ? { ok: true, bytes: result.bytes, reason: "" }
-        : { ok: false, reason: result.reason };
+      if (this.speakStream) await this.runSynthStreaming(state, generation);
+      else await this.runSynthBuffered(state, generation);
     } catch (err) {
-      outcome = { ok: false, reason: err instanceof Error ? err.message : "network" };
+      state.failed = state.failed ?? (err instanceof Error ? err.message : "network");
     }
     // 打断之后回来的音频：不占槽、不入队、不出声（cancel 已经把计数器清零）
-    if (generation !== this.generation) return;
+    if (generation !== this.generation) {
+      this.jobs.delete(job.order);
+      return;
+    }
+    state.done = true;
     this.synthInflight = Math.max(0, this.synthInflight - 1);
-    this.synthReady.set(job.order, { job, outcome });
-    this.flushSynth();
+    this.drain();
     this.pumpSynth();
   }
 
-  /**
-   * 只按句序连续交付：乱序先完成的那句在这里等前一句落定，
-   * 否则播放顺序会跟字幕对不上（两个预取槽就必然出现乱序）。
-   */
-  private flushSynth(): void {
-    for (;;) {
-      const entry = this.synthReady.get(this.synthHead);
-      if (!entry) break;
-      this.synthReady.delete(this.synthHead);
-      this.synthHead += 1;
-      if (!entry.outcome.ok || !entry.outcome.bytes) {
-        // 预取/合成失败只降级**这一句**：下一句该走 Edge 还走 Edge，不整轮降级
-        this.lastErrorValue = `${entry.job.tier} tts: ${entry.outcome.reason}`;
-        this.noticeBrowserFallback(`合成失败改本机音（${entry.outcome.reason}）`);
-        this.ensureBrowser().speak(entry.job.text);
-        continue;
+  /** 流式：按 ~1KB 聚合后入队，句尾的零头在流结束时补上（不能丢，丢了句尾缺字） */
+  private async runSynthStreaming(state: JobState, generation: number): Promise<void> {
+    const speakStream = this.speakStream;
+    if (!speakStream) return;
+    const result = await speakStream(state.job.text);
+    if (generation !== this.generation) return;
+    if (!result.ok) {
+      state.failed = result.reason;
+      return;
+    }
+    let pending: Uint8Array[] = [];
+    let pendingBytes = 0;
+    try {
+      for await (const chunk of result.chunks) {
+        if (generation !== this.generation) return;
+        if (!chunk || chunk.byteLength === 0) continue;
+        pending.push(chunk);
+        pendingBytes += chunk.byteLength;
+        if (pendingBytes < MIN_AUDIO_CHUNK_BYTES) continue;
+        state.chunks.push(`data:audio/mpeg;base64,${bytesToBase64(mergeBytes(pending))}`);
+        pending = [];
+        pendingBytes = 0;
+        this.drain();
       }
-      this.seq += 1;
-      this.ensureStream().pushChunk({
-        seq: this.seq,
-        dataUrl: `data:audio/mpeg;base64,${arrayBufferToBase64(entry.outcome.bytes)}`,
-        mime: "audio/mpeg",
-      });
+    } finally {
+      if (generation === this.generation && pendingBytes > 0) {
+        state.chunks.push(`data:audio/mpeg;base64,${bytesToBase64(mergeBytes(pending))}`);
+      }
+    }
+    if (generation !== this.generation) return;
+    // 连一块音频都没收到：当成这句失败，交给本机音兜底
+    if (state.chunks.length === 0 && !state.failed) state.failed = "empty-audio";
+  }
+
+  /** 整块：既有行为，一字不变地保留（Deepgram 英文路径就是这条） */
+  private async runSynthBuffered(state: JobState, generation: number): Promise<void> {
+    const result = await this.speakRequest(state.job.text);
+    if (generation !== this.generation) return;
+    if (result.ok) {
+      state.chunks.push(`data:audio/mpeg;base64,${bytesToBase64(new Uint8Array(result.bytes))}`);
+    } else {
+      state.failed = result.reason;
+    }
+  }
+
+  /**
+   * 只按句序交付：队首那句的分片**到手即送**，后面几句的分片先待在自己队列里。
+   * 这是「首块即播」与「播放/字幕顺序不乱」能同时成立的唯一办法 ——
+   * 预取可以乱序完成，但喂给播放器的必须是一条连续的时间线。
+   */
+  private drain(): void {
+    for (;;) {
+      const state = this.jobs.get(this.synthHead);
+      if (!state) return;
+      while (state.chunks.length > 0) {
+        const dataUrl = state.chunks.shift();
+        if (!dataUrl) break;
+        this.seq += 1;
+        this.ensureStream().pushChunk({ seq: this.seq, dataUrl, mime: "audio/mpeg" });
+      }
+      if (!state.done) return;
+      this.jobs.delete(state.job.order);
+      this.synthHead += 1;
+      if (state.failed) {
+        // 预取/合成失败只降级**这一句**：下一句该走哪条还走哪条，不整轮降级
+        this.lastErrorValue = `${state.job.tier} tts: ${state.failed}`;
+        this.noticeBrowserFallback(`合成失败改本机音（${state.failed}）`);
+        this.ensureBrowser().speak(state.job.text);
+      }
     }
   }
 

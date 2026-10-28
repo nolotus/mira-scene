@@ -11,9 +11,9 @@
 | # | 要求 | 状态 | 证据 | 下一步 |
 |---|---|---|---|---|
 | ① | 场景化界面（非聊天列表）+ 待机/倾听/思考/说话 4 态 | **做完** | `StageBackdrop.tsx` 4 层景深；四态见 `visuals.ts STATUS_SPEC`；截图 `/tmp/shots/live-idle-*.png`（三时刻采样验证非动画假象） | —（构图微调已做：`bottom:30%/height:56%`） |
-| ② | 文字 + 麦克风互动，语音回复 + 同步字幕，多轮 | **做完** | STT：Deepgram `nova-2`(zh) 服务端 WS 代理，实测 `1×speech_started + 3×interim + 1×final`（final 滞后约 1.1s）；TTS：中文 Edge `zh-CN-XiaoxiaoNeural`（round-trip 置信度 1.00）、英文 Deepgram Aura | 中文首句延迟见「可选·实时语音」 |
-| ③ | 语音打断五条后果 + 迟到响应不重播 | **部分** | 五步链路 `bargeIn.ts performBargeIn`；`epoch+turnId` 双闸门（真服务端连打断 10 次 0 失效）；TTS 代际令牌；「丢弃迟到事件 N」可见；`speech_started` 触发 + AEC 已接线（512 测试） | **端到端时间线未拿到**（`speech_started → 静音` 毫秒数），探针在跑 |
-| ④ | 结构化指令驱动画面（3 情绪 / 2 动作 / 1 场景变化 / 1 内容触发事件） | **做完** | 7 类 Directive；`CUE_TEMPLATES` 四套时序（storm 1800ms 四层）；输入「外面还在下雨吗」→ `shiver/lightning/rain_heavy/camera.shake/glance_window`；闪电只在 storm（结构性测试锁死） | **锚定到台词位置**（`atChar`）在跑：解决"说到哪画面变到哪" |
+| ② | 文字 + 麦克风互动，语音回复 + 同步字幕，多轮 | **做完** | STT：Deepgram `nova-2`(zh) 服务端 WS 代理，实测 `1×speech_started + 3×interim + 1×final`（final 滞后约 1.1s）；TTS：中文 Edge `zh-CN-XiaoxiaoNeural`（round-trip 置信度 1.00）、英文 Deepgram Aura。**中文 TTS 延迟实测**：CLI 路径 1711ms → 原生 WS 热连接 **287ms**（冷启动首次握手 1192ms） | — |
+| ③ | 语音打断五条后果 + 迟到响应不重播 | **部分**（机制已修，缺真机证据） | 五步链路 `bargeIn.ts performBargeIn`；`epoch+turnId` 双闸门（真服务端连打断 10 次 0 失效）；TTS 代际令牌；「丢弃迟到事件 N」可见。**根因已修**：`deepgramStt.ts` 曾在 WS 握手（约 1s）期间直接丢弃 MediaRecorder 音频 → Deepgram 收不到音频、不发 `speech_started`；现改为有界 pre-roll 队列（1.5s 上限，超限丢最旧并计数）。**单一触发源**：`barge-in source: deepgram / energy / none` 三态，源不匹配的信号不进闸门（有机械测试）。**真生产代码模块级 trace**：`speech_started → 音频停止 = 199.9ms`（含 200ms interim 确认窗口）；idle 时 `gate:ignore:not-speaking` 不打断 | **真机待验**：Chrome/Linux 常不报 `getSettings().echoCancellation`（本机即 `aec=unknown`），此时按保守策略 `source=none` → 自动语音打断**关闭**，只剩 Esc/按钮。真人外放是否会自打断，只有带真麦克风的机器能定 |
+| ④ | 结构化指令驱动画面（3 情绪 / 2 动作 / 1 场景变化 / 1 内容触发事件） | **做完** | 7 类 Directive；`CUE_TEMPLATES` 四套时序（storm 1800ms 四层）；输入「外面还在下雨吗」→ `shiver/lightning/rain_heavy/camera.shake/glance_window`；闪电只在 storm（结构性测试锁死）；**指令已锚定字符位置**（`atChar`，服务端按字符边界投递，老客户端退化为立即执行） | 客户端按水位排队接线（`state/session.ts` + `store.ts`），等 `state/**` 腾出 |
 | ⑤ | ≥1 种多模态 + 加载/结束/中断/失败 | **做完** | 真媒体片段：12 帧 spritesheet 145KB（程序化生成 + 自写调色板量化），四态真进分支，`?demo=media` 演示 404 降级；照片级角色 `?char=photo`（素材 + 变体 + 微动） | 照片版"贴上去"感（接触阴影/边缘色匹配） |
 | ⑥ | 闭环 + 超时断线失败反馈 + 连打断不播失效 + 无密钥可看核心流程 | **做完** | 9 类故障分支（`?demo=fail\|timeout\|tts\|media` 可注入）；Mock 零密钥跑通全部流程；缓存/配额/诊断齐全 | — |
 
@@ -39,7 +39,7 @@
 | 自动检测开口并自然打断 | **部分** | `speech_started` + interim 确认 + 250ms 爬升期 + 400ms 防抖；AEC `getSettings()` 实测 true。**缺端到端时间线**（成本 0.5h） | **高**：③ 的头号能力 |
 | 回声消除 | **部分** | 浏览器 `echoCancellation` 三件套 + 回读上报；长句回声仍可能自打断（成本 2h：加自适应阈值或改用半双工） | 中 |
 | 流式字幕 | **做完** | STT `interim_results`，边说边出字 | — |
-| 展示首包延迟/关键耗时 | **做完** | `timings.firstText/firstDirective/total` + 诊断面板 + `?trace=1` 时间线 | — |
+| 展示首包延迟/关键耗时 | **做完** | `timings.firstText/firstDirective/total` + 诊断面板 + `?trace=1` 时间线；中文 TTS 从 1711ms（CLI）降到 287ms（原生 WS 热连接），原生令牌按 `drm.py` 逐位移植、30 个时间戳全表对拍通过 | — |
 | 区分真打断与「嗯」「对」附和 | **部分** | 200ms + interim 确认挡短促噪声；**不做语义判别**（成本 1.5h：按 transcript 长度/词表过滤） | 中 |
 | 断线重连与会话恢复 | **部分** | 手动重连可用、状态与历史保留；**无自动重连退避**（成本 1h） | **高**：评审拔网线就会看 |
 

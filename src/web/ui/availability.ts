@@ -52,7 +52,7 @@ export function describeMicAvailability(input: MicAvailabilityInput): MicNotice 
       actions: [
         "用 http://localhost:5173 打开（本机评审最省事）",
         "或在文字输入框里直接打字，对话与画面全部可用",
-        "「按住说话」不需要麦克风权限：仍可打断、可进入倾听态",
+        "底栏此时只留打字与这句说明；打断用 Esc 或「打断」按钮",
       ],
       primaryAction: "去打字",
     };
@@ -67,7 +67,7 @@ export function describeMicAvailability(input: MicAvailabilityInput): MicNotice 
         : "缺少麦克风采集能力（getUserMedia），无法开启持续倾听。",
       actions: [
         "用文字输入框打字：整条对话、打断、字幕、画面指令都不受影响",
-        "「按住说话」仍可手动打断并进入倾听态（不需要语音识别）",
+        "这里已收起语音入口（没有识别就没有「倾听」的产出）；打断用 Esc 或「打断」按钮",
         "想演示语音时换 Chrome / Edge 打开同一地址",
       ],
       primaryAction: "去打字",
@@ -83,7 +83,7 @@ export function describeMicAvailability(input: MicAvailabilityInput): MicNotice 
       reason: "权限没问题，但浏览器的语音识别服务没有返回结果（无网络，或内核没提供该服务）。",
       actions: [
         "用文字输入框打字：对话、打断、字幕、画面指令都不受影响",
-        "「按住说话」仍可打断并进入倾听态",
+        "这里已收起语音入口（拿不到转写就没有「倾听」的产出）；打断用 Esc 或「打断」按钮",
         "联网后换 Chrome / Edge 打开可恢复语音转写",
       ],
       primaryAction: "去打字",

@@ -1,0 +1,222 @@
+/*
+ * 照片角色（?char=photo）的样式。
+ *
+ * 与 SVG 版的分工：SVG 把「站位 / 骨架 / 五官」拆成多层各自动画；照片只有一张定妆照 +
+ * 两块局部补丁，所以这里只留三层：
+ *   .char-photo__place     站位（状态位移 + 过渡，120–200ms）
+ *   .char-photo__breathe   呼吸（1.000↔1.006，4.6s）
+ *   .char-photo__nod       说话时的极轻点头（≤1.6px / 0.3°）
+ *
+ * 定妆照画布的宽高比来自 spec.size（内联 --photo-ar），补丁位置来自 anchor 换算的百分比，
+ * 所以换一张任意分辨率的定妆照都不需要改这里的任何数字。
+ *
+ * prefers-reduced-motion：微动全关，只保留「状态之间的静态差异」（站位、表情）。
+ */
+
+.char-photo {
+  position: absolute;
+  left: 50%;
+  /* 定妆照是胸像裁切，比全身 SVG 占更高的画框位置 */
+  bottom: var(--photo-bottom, 9%);
+  /*
+   * 宽度优先，而不是高度优先：
+   * 定妆照画布是近正方（793×800），按「高度 80%」定尺会算出 739px 宽 —— 比 430px 的
+   * 舞台宽 1.7 倍，左右两侧被 .stage-canvas 硬切掉，脸反而只剩中间一条（实测改前
+   * rect x=-154.5, w=739.1）。改成按舞台宽度取尺：左右各留 3%，高度由宽高比反推，
+   * 于是人像完整落在舞台内，底部仍由 dock 截断（配合下面的渐隐，是设计不是裁切失误）。
+   */
+  width: var(--photo-width, 94%);
+  height: auto;
+  aspect-ratio: var(--photo-ar, 3 / 4);
+  max-height: var(--photo-height, 80%);
+  translate: -50% 0;
+  will-change: transform;
+  /* 照片是合成层，阴影交给底下场景；这里只保证不会被雨幕整片覆盖 */
+  isolation: isolate;
+}
+
+/* 接触阴影：随主光方向偏移的柔和椭圆，压在角色脚下（不压在字幕上，见 bottom 偏移） */
+.char-photo__shadow {
+  position: absolute;
+  left: calc(50% + var(--photo-shadow-x, 0px));
+  bottom: var(--photo-shadow-y, 0px);
+  width: var(--photo-shadow-w, 46%);
+  height: var(--photo-shadow-h, 12px);
+  translate: -50% 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    50% 50% at 50% 50%,
+    var(--photo-shadow-color, rgba(8, 5, 4, 0.9)) 0%,
+    rgba(0, 0, 0, 0) 72%
+  );
+  filter: blur(var(--photo-shadow-blur, 3px));
+  opacity: var(--photo-shadow-opacity, 0.6);
+  pointer-events: none;
+}
+
+.char-photo__place {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 88%;
+  transform: translate3d(0, var(--photo-y, 0px), 0) rotate(var(--photo-rot, 0deg))
+    scale(var(--photo-scale, 1));
+  transition: transform var(--photo-dur, 160ms) cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+
+.char-photo__breathe {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 100%;
+  animation: photoBreathe var(--photo-breath-dur, 4.6s) ease-in-out infinite;
+}
+
+.char-photo__nod {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 94%;
+  /*
+   * 底部渐隐：24–36px 内 alpha 从 1 走到 0（`bottomFadePx` 按舞台宽度算）。
+   * 8–12px 实测读作「一刀切」——胸像底边本来就是水平直线，过渡太短等于没过渡。
+   * 元素底边同时被 `--photo-bottom` 抬到字幕带上沿之上 12px（`photoBottomPx`），
+   * 所以渐隐整段落在字幕带之外，不会和字幕的渐变叠成第二条横线。
+   * 只作用在「人」这一层，接触阴影是它的兄弟节点，不会被一起抹掉。
+   */
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 calc(100% - var(--photo-fade-h, 10px)),
+    rgba(0, 0, 0, 0) 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000 calc(100% - var(--photo-fade-h, 10px)),
+    rgba(0, 0, 0, 0) 100%
+  );
+}
+
+/*
+ * 调色：只作用于角色像素（img 自带 alpha，filter 不染背景）。
+ * 系数来自 `photoGrade.colorGrade(palette, lighting)` —— 主光越暖、场景越暗，
+ * 饱和度与亮度收得越狠，sepia 补得越多。改前这里是 `filter: none`（实测
+ * 角色 R-B 均值比场景高 70.8、亮度高 2.9 倍）。
+ */
+/* 眼/嘴补丁必须与人像同一套调色，否则补丁会比脸亮一档、边缘露馅 */
+.char-photo__patch {
+  filter: saturate(var(--photo-grade-sat, 0.88)) brightness(var(--photo-grade-bright, 0.84))
+    sepia(var(--photo-grade-sepia, 0.1));
+}
+
+/*
+ * 道具遮挡：照片模式下，杯子按「角色 rect 遮挡判定」整组隐藏（`propOcclusion`）。
+ * 判据不是 z-order —— 道具本来就在角色层之下；问题是它落在角色框内的**透明缝隙**里
+ * （肩线旁边、抠图边缘之外），既没被人挡住，也不在桌面上，读作「杯子放在她肩上」。
+ * 只在照片模式生效；SVG 模式的道具一个字节都不动。
+ */
+html[data-mira-prop-occlusion="hide"] .scene .table-cup,
+html[data-mira-prop-occlusion="hide"] .scene .table-saucer {
+  visibility: hidden;
+}
+
+/*
+ * SVG 角色层兜底：照片就绪后这一层是被**卸载**的（条件不渲染），不是 opacity:0 占位。
+ * 这条规则只防「以后有人把条件渲染改回并存」——真并存时也不许露出来，
+ * 因为 SVG 的发夹描边会直接压在照片上。
+ */
+html[data-mira-char="photo"] .char-rig {
+  visibility: hidden;
+}
+
+/* 说话才点头：静止时这一层不动，避免「待机也在晃」 */
+.char-photo[data-status="speaking"] .char-photo__nod {
+  animation: photoNod 2.8s ease-in-out infinite;
+}
+
+/* 倾听时呼吸快一点（沿用 SVG 版 STATUS_SPEC.breathDur 的相对关系） */
+.char-photo[data-status="listening"] .char-photo__breathe {
+  animation-duration: 2.3s;
+}
+
+.char-photo[data-status="thinking"] .char-photo__breathe {
+  animation-duration: 5.8s;
+}
+
+.char-photo__base {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /*
+   * 边缘色匹配：drop-shadow 用场景暗色、近零模糊，只和抠图边缘的半透明像素合成，
+   * 把残留的亮边往场景主色拉一档（受影响的是轮廓那 1–2px，脸本身不变）。
+   * 颜色与模糊半径来自 photoStage.edgeTint(palette)，不是写死的黑。
+   */
+  /*
+   * 调色链在前、边缘色补在后：先按场景把亮度/彩度/暖度收到位，再给轮廓补一道场景暗色。
+   * 系数来自 `photoGrade.colorGrade(palette, lighting)`；改前这里是裸的 drop-shadow，
+   * 实测角色 R-B 均值比场景高 70.83、亮度是场景的 2.9 倍。
+   */
+  filter: saturate(var(--photo-grade-sat, 0.88)) brightness(var(--photo-grade-bright, 0.84))
+    sepia(var(--photo-grade-sepia, 0.1))
+    drop-shadow(0 0 var(--photo-edge-blur, 0.85px) var(--photo-edge-color, rgba(20, 12, 8, 0.85)));
+  object-fit: fill;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.char-photo__patch {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--photo-fade, 90ms) linear;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.char-photo__patch[data-on="true"] {
+  opacity: 1;
+}
+
+@keyframes photoBreathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(var(--photo-breath-scale, 1.006));
+  }
+}
+
+@keyframes photoNod {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  32% {
+    transform: translateY(calc(var(--photo-nod-px, 1.6px) * -1)) rotate(var(--photo-nod-deg, 0.3deg));
+  }
+  68% {
+    transform: translateY(0.5px) rotate(0deg);
+  }
+}
+
+/* prefers-reduced-motion：微动全关（组件的 JS 侧也会停掉眨眼随机） */
+.char-photo[data-motion="reduced"] .char-photo__breathe,
+.char-photo[data-motion="reduced"] .char-photo__nod {
+  animation: none;
+}
+
+.char-photo[data-motion="reduced"] .char-photo__place,
+.char-photo[data-motion="reduced"] .char-photo__patch {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .char-photo .char-photo__breathe,
+  .char-photo .char-photo__nod {
+    animation: none !important;
+  }
+
+  .char-photo .char-photo__place,
+  .char-photo .char-photo__patch {
+    transition: none !important;
+  }
+}
