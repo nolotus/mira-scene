@@ -24,6 +24,8 @@ export interface AudioChunk {
   seq: number;
   dataUrl: string;
   mime: string;
+  /** 这一段音频属于哪一轮（只给观测用，播放逻辑不依赖它） */
+  turnId?: string;
 }
 
 export interface TTSProvider {
@@ -406,7 +408,8 @@ export class StreamTTS implements TTSProvider, AudioChunkSink {
   private pendingText = "";
   private ctx: AudioContext | null = null;
   private generation = 0;
-  private queue: AudioBuffer[] = [];
+  /** 待播队列：buffer 带上它自己那一轮的 id（不能共用一个「当前轮」字段，跨轮会串） */
+  private queue: Array<{ buffer: AudioBuffer; turnId?: string }> = [];
   private sources = new Set<AudioBufferSourceNode>();
   private chain: Promise<void> = Promise.resolve();
   private nextStartAt = 0;
@@ -482,7 +485,7 @@ export class StreamTTS implements TTSProvider, AudioChunkSink {
         const ctx = this.ensureContext();
         const buffer = await ctx.decodeAudioData(raw.slice(0));
         if (generation !== this.generation) return; // 解码期间被打断
-        this.queue.push(buffer);
+        this.queue.push({ buffer, turnId: chunk.turnId });
         this.drainQueue();
       })
       .catch((err: unknown) => {
@@ -546,8 +549,9 @@ export class StreamTTS implements TTSProvider, AudioChunkSink {
   private drainQueue(): void {
     const ctx = this.ctx;
     if (!ctx) return;
-    let buffer = this.queue.shift();
-    while (buffer) {
+    let item = this.queue.shift();
+    while (item) {
+      const { buffer, turnId } = item;
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       const gain = ctx.createGain();
@@ -570,10 +574,13 @@ export class StreamTTS implements TTSProvider, AudioChunkSink {
       };
       try {
         source.start(startAt);
+        // 「真正听到」的时刻：分片交付（turn:first-audio）之后还要 base64 解码 +
+        // decodeAudioData + AudioContext 排期，这段几十到几百 ms 才是用户感知的部分。
+        obsFirst("turn:first-sound", turnId);
       } catch (err) {
         this.lastError = err instanceof Error ? err.message : String(err);
       }
-      buffer = this.queue.shift();
+      item = this.queue.shift();
     }
   }
 }
@@ -606,6 +613,8 @@ export function containsCjk(text: string): boolean {
  * 区间里 → 被判成英文 → 打到未配置的 Deepgram → 503 → 降级出第二个音色。
  * 纯标点本来就没有声音可念，直接不派发是最省事也最正确的处理。
  */
+import { currentObsTurnId, obsEvent, obsFirst } from "../obs/obs";
+
 const SPEAKABLE = /[\p{L}\p{N}]/u;
 
 export function isSpeakable(text: string): boolean {
@@ -801,6 +810,14 @@ interface SynthJob {
   order: number;
   text: string;
   tier: "edge" | "deepgram";
+  /**
+   * 派发那一刻的轮次 id（快照）。
+   *
+   * 不能等请求回来再问「现在是哪一轮」：打断之后新旧轮会同时在飞，
+   * 上一轮被取消的请求迟到返回时，`currentObsTurnId()` 已经指向新一轮了 ——
+   * 那条请求会被记到下一轮头上（2026-10-28 审查发现）。
+   */
+  turnId?: string;
 }
 
 /** 一句话的流式交付状态 */
@@ -958,13 +975,27 @@ export class RoutedTTS implements TTSProvider {
       if (this.serverPending()) {
         this.lastErrorValue = "角色音正在合成或播放，本机音会与之重叠：这一句只显示字幕";
         this.onSynthIssue?.(this.lastErrorValue);
+        obsEvent("tts:issue", {
+          turnId: currentObsTurnId() ?? undefined,
+          detail: { reason: this.lastErrorValue },
+        });
         return;
       }
       this.noticeBrowserFallback(containsCjk(segment) ? "本机合成音（非角色音色）" : "浏览器合成音");
+      // 观测：本机音也是一次「请求」，否则面板上这一轮会显示「没走 TTS」，读起来像丢了数据
+      obsEvent("tts:request", {
+        turnId: currentObsTurnId() ?? undefined,
+        detail: { tier: "browser", ms: null, ok: true, reason: null },
+      });
       this.ensureBrowser().speak(segment);
       return;
     }
-    this.synthQueue.push({ order: this.synthOrder, text: segment, tier });
+    this.synthQueue.push({
+      order: this.synthOrder,
+      text: segment,
+      tier,
+      turnId: currentObsTurnId() ?? undefined,
+    });
     this.synthOrder += 1;
     this.pumpSynth();
   }
@@ -1032,7 +1063,17 @@ export class RoutedTTS implements TTSProvider {
   private async runSynthStreaming(state: JobState, generation: number): Promise<void> {
     const speakStream = this.speakStream;
     if (!speakStream) return;
+    const requestStartedAt = performance.now();
     const result = await speakStream(state.job.text);
+    obsEvent("tts:request", {
+      turnId: state.job.turnId,
+      detail: {
+        tier: state.job.tier,
+        ms: Math.round(performance.now() - requestStartedAt),
+        ok: result.ok,
+        reason: result.ok ? null : result.reason,
+      },
+    });
     if (generation !== this.generation) return;
     if (!result.ok) {
       state.failed = result.reason;
@@ -1089,11 +1130,19 @@ export class RoutedTTS implements TTSProvider {
         const dataUrl = state.chunks.shift();
         if (!dataUrl) break;
         this.seq += 1;
+        // 「首个音频包」= 第一个分片交付给播放器的时刻。归属用 job 自己的 turnId，
+        // 不能用「当前轮」：旧轮的尾巴音频可能在新轮开始后才起播。
+        obsFirst("turn:first-audio", state.job.turnId);
         // 最后一道硬保证：系统音正在播时绝不让角色音叠上去。
         // 上层路由已经尽量避免这种组合，这里是兜底 —— 谁先出声谁不被打断是次要的，
         // 「只有一个音色」是硬要求。
         if (this.browser?.isSpeaking === true) this.browser.cancel();
-        this.ensureStream().pushChunk({ seq: this.seq, dataUrl, mime: "audio/mpeg" });
+        this.ensureStream().pushChunk({
+          seq: this.seq,
+          dataUrl,
+          mime: "audio/mpeg",
+          turnId: state.job.turnId,
+        });
       }
       if (!state.done) return;
       this.jobs.delete(state.job.order);
@@ -1104,6 +1153,10 @@ export class RoutedTTS implements TTSProvider {
         // 用户听到的就是两个声音同时说话（2026-10-28 实测复现）。
         this.lastErrorValue = `${state.job.tier} tts: ${state.failed}`;
         this.onSynthIssue?.(`这一句没有合成出来（${state.failed}），只有字幕`);
+        obsEvent("tts:issue", {
+          turnId: state.job.turnId,
+          detail: { reason: state.failed },
+        });
       }
     }
   }

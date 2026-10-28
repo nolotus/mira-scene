@@ -8,6 +8,8 @@ import { createVoiceTts, type AudioMode, type TTSProvider } from "./voice/tts";
 import { isSpeechRecognitionSupported, type SttLang } from "./voice/stt";
 import { createDeepgramStt, type DeepgramSttController, type DeepgramSttDiagnostics, type DeepgramSttOptions } from "./voice/deepgramStt";
 import { fetchVoiceStatus, type VoiceStatus } from "./voice/voiceStatus";
+import { enableObs, obsEvent } from "./obs/obs";
+import { ObsPanel } from "./obs/ObsPanel";
 import { reportVoiceChannel } from "./voice/voiceDiag";
 import { MicEnergyVad } from "./voice/vad";
 import {
@@ -117,9 +119,17 @@ export function App() {
   useEffect(() => {
     let alive = true;
     // 失败 = 未知 → null（客户端按「都不可用」回退，不报错、不卡住）
+    const statusStartedAt = nowMs();
     void fetchVoiceStatus().then((status) => {
       if (!alive) return;
       setVoiceStatus(status);
+      obsEvent("status:ready", {
+        detail: {
+          ms: Math.round(nowMs() - statusStartedAt),
+          ttsZh: status?.ttsZh === true,
+          tts: status?.tts === true,
+        },
+      });
       // 两档分别上报：中文看 Edge CLI，英文看 Deepgram key
       reportVoiceChannel({
         ttsZh: status?.ttsZh ? "edge" : "browser",
@@ -160,6 +170,15 @@ export function App() {
     () => new SessionStore({ api, tts, audioMode: boot.audio }),
     [api, tts, boot.audio],
   );
+
+  // `?obs=1`：量化观测面板（分段耗时 / 错误 / TTS 通道），独立于主界面
+  const obsOn = useMemo(
+    () => typeof window !== "undefined" && new URLSearchParams(window.location.search).get("obs") === "1",
+    [],
+  );
+  useEffect(() => {
+    if (obsOn) enableObs();
+  }, [obsOn]);
 
   const view = useSessionView(store);
   const viewRef = useRef(view);
@@ -777,6 +796,8 @@ export function App() {
           onLangChange={(lang) => store.setSttLang(lang)}
         />
       </DockPortal>
+
+      {obsOn ? <ObsPanel /> : null}
     </div>
   );
 }

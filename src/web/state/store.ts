@@ -19,6 +19,7 @@ import type { HealthInfo, SessionApi } from "./api";
 import { ApiError, describeApiError, isAbort } from "./api";
 import type { BargeInReason, BargeInResult } from "./bargeIn";
 import { performBargeIn } from "./bargeIn";
+import { obsEvent, obsFirst } from "../obs/obs";
 import type { SessionMachine } from "./session";
 import {
   ACTION_QUEUE_LIMIT,
@@ -755,6 +756,10 @@ export class SessionStore {
    */
   interrupt(reason: BargeInReason = "button", turnIdOverride?: string | null): BargeInResult {
     const turnId = turnIdOverride === undefined ? this.machine.turnId : turnIdOverride;
+    // 打断会 bump epoch，旧轮的 `turn.end` 随后会被 epoch 闸门丢掉 ——
+    // 于是那一轮在观测页上永远是「没有结束、也没有错误」= 看起来 ok，打断率恒为 0。
+    // 这里显式落一条，把「被打断」这件事记到它该在的那一轮上。
+    if (turnId) obsEvent("turn:end", { turnId, detail: { interrupted: true } });
     const result = performBargeIn(
       {
         epoch: () => this.machine.epoch,
@@ -898,6 +903,7 @@ export class SessionStore {
 
     const turnId = newTurnId();
     this.machine = reduceRequestSent(this.machine, turnId, this.clock());
+    obsEvent("turn:send", { turnId, detail: { chars: userText.length } });
     // 新一轮从零字数开始（reduceRequestSent 已把 text 清空），旧队列一并作废
     this.resetCues();
     this.emit();
@@ -929,6 +935,7 @@ export class SessionStore {
           onEvent: (event) => this.handleEvent(event),
           onFirstEvent: () => {
             if (firstEventAt === null) firstEventAt = this.clock();
+            obsFirst("turn:first-event", turnId);
           },
         },
         {
@@ -1002,6 +1009,10 @@ export class SessionStore {
       return;
     }
 
+    // 观测：模型首字与首个音频包（分段指标的两个右端点）
+    if (event.type === "text.delta") obsFirst("turn:first-delta", event.turnId);
+    if (event.type === "audio.chunk") obsFirst("turn:first-audio", event.turnId);
+
     // 收尾 / 换轮 / 出错这三个生命周期点是队列的边界：
     //  · turn.end 正常收尾 → 把剩下的全部放掉：末尾那条 branch 不能因为「水位还没到」而丢；
     //  · turn.end 被打断、不可恢复的 error → 直接作废（用户已经开口，剩下的画面不该再演）；
@@ -1046,7 +1057,12 @@ export class SessionStore {
 
     // 只有真正被接受的事件才驱动声音：迟到/串轮的音频分片连解码都不做
     if (event.type === "audio.chunk" && hasAudioChunkSink(this.deps.tts)) {
-      this.deps.tts.pushChunk({ seq: event.seq, dataUrl: event.dataUrl, mime: event.mime });
+      this.deps.tts.pushChunk({
+        seq: event.seq,
+        dataUrl: event.dataUrl,
+        mime: event.mime,
+        turnId: event.turnId,
+      });
     }
     if (event.type === "text.delta") {
       this.deps.tts.speak(event.text);
@@ -1055,11 +1071,16 @@ export class SessionStore {
     if (event.type === "turn.end") {
       if (event.interrupted) this.deps.tts.cancel();
       else this.deps.tts.flush();
+      obsEvent("turn:end", { turnId: event.turnId, detail: { interrupted: event.interrupted } });
       this.recordHistory();
       this.turns += 1;
     }
 
     if (event.type === "error") {
+      obsEvent("error", {
+        turnId: event.turnId,
+        detail: { message: event.message, recoverable: event.recoverable },
+      });
       this.setBanner({
         text: event.recoverable ? `出错了：${event.message}` : `本轮失败：${event.message}`,
         tone: event.recoverable ? "warn" : "error",
