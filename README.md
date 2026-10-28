@@ -155,7 +155,8 @@ SVG + CSS 分层（发/脸/眉/眼/嘴/雨衣/发夹/袖口），7 情绪 × 5 �
 | 真模型导演 | 任意 OpenAI 兼容端点（本次用 lithosai `DeepSeek-V4.1-Flash`） | `?director=live` 时页面真跑通，首字 639ms；默认 mock，避免公开站烧额度 |
 | **语音识别（STT）** | **Deepgram `nova-2`，`language=zh`** | 走服务端 WS 代理（key 不进浏览器）。实测一句中文得到 `1× speech_started + 3× interim + 1× final`，**final 在说完后约 1.1 秒**出现 |
 | 语音合成（英文） | Deepgram `aura-asteria-en`（服务端代理） | 返回真 MP3（实测 15,046 字节、MPEG 魔数正确）；走本项目既有的 `audio.chunk` 播放路径 |
-| 语音合成（中文） | 浏览器 `speechSynthesis` | **Deepgram 的 Aura 只有英语**：中文文本喂进去不报错，但合成的是废音（round-trip 转回「位于市政府」）。所以含 CJK 的文本在**发上游之前**就 400 拦掉，回退浏览器 TTS |
+| 语音合成（中文） | **Edge TTS `zh-CN-XiaoxiaoNeural`**（服务端代理，非官方接口） | 音色可调（`--rate/-8% --pitch/-3Hz`）以贴近角色设定。**客观验证**：合成中文再经 Deepgram STT 转回，原句一字不差、置信度 **1.00**；同法测 Deepgram 自带的中文 TTS 只得 0.56（「外媒体验再次一码」）。代价：**每句 1.7–2.0 秒**（含 python 启动），第 1 句遮不掉，第 2 句起靠预取藏进播放时间 |
+| 参考图条件生成 | Cloudflare `flux-2-dev`（multipart 提交参考图） | **实测结论：保造型、不保脸。** 用同一张定妆照作参考、prompt 明写「identical face」，生成的人脸是三个不同的人；第二张连雨衣都丢了。所以「跨场景同一个人」这条**不能靠它实现**，只能靠「角色只生成一次 + 只换背景」 |
 | 生成式插图 | Cloudflare Workers AI `flux-1-schnell` | 实测 2.2–8.3 秒、约 600KB JPEG；三层配额（每会话 2 张 / 每日 60 张 / 未配置静默不可用）+ prompt 哈希缓存（命中不计配额） |
 | HTTPS | Caddy + Let's Encrypt | 自动签发，SSE 经反代实测真流式（首末事件间隔 1372ms） |
 
@@ -166,6 +167,10 @@ SVG + CSS 分层（发/脸/眉/眼/嘴/雨衣/发夹/袖口），7 情绪 × 5 �
 **明确没接的**：ElevenLabs（key 401 失效）、OpenRouter（账号级 403）、Gemini Live（无 AI Studio 凭据——它能原生输出中文语音，但接入意味着重写打断链路，笔试窗口内不做）。`audio.chunk` 路径的**真 MP3 在浏览器里解码播放**这一步尚未验证（目前只验证了真 MP3 字节由代理正确产出 + 时序被 stub 覆盖）。
 
 ## 已知问题
+
+- **跨场景「同一张脸」做不到**：`flux-2-dev` 的参考图是风格条件而非身份条件（实测三张不同脸，换装也会丢）。当前能做的一致性上限是「角色生成一次、只换背景与光照」。
+- **中文语音第 1 句延迟 1.7–2.0 秒**（Edge TTS 含进程启动）；第 2 句起靠预取掩盖。
+- **`audio.chunk` 的真音频解码播放未验证**：所有测试里 MP3 字节与 `decodeAudioData` 都是 stub，只覆盖了「路由→入队→解码调用→打断不出声」的时序。
 
 - **生成图与 SVG 角色不是同一张脸**：prompt 只能约束「26 岁 / 琥珀雨衣 / 星星发夹 / 暴雨夜咖啡馆」，flux-schnell 没有 seed 也没有参考图，服装与环境连续、**人脸不连续**。这一条不能声称「保持了人物一致性」。
 - **语音识别的结束判定依赖上游**：说完到出终稿约 1.1 秒（Deepgram endpointing），期间字幕停在最后一条 interim 上。

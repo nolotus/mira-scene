@@ -147,6 +147,14 @@ export function Dock(props: DockProps) {
             丢弃迟到事件 {view.droppedEvents}
           </span>
         ) : null}
+        {view.droppedActions > 0 ? (
+          <span
+            className="mira-chip mira-chip--drop"
+            title="指令枚举合法、但当前场景容不下（场景适配层按 spec.actions 丢弃）"
+          >
+            场景外动作 {view.droppedActions}
+          </span>
+        ) : null}
       </div>
 
       <form className="mira-row mira-row--input" onSubmit={onSubmit}>

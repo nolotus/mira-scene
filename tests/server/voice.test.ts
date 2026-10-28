@@ -42,17 +42,23 @@ async function readJson(res: Response): Promise<Record<string, unknown>> {
 describe("GET /api/voice/status", () => {
   test("没有 key：stt / tts 都是 false（正常态，200 不是错误）", async () => {
     const { app } = appWithVoice({});
-    expect(app.voice).toEqual({ stt: false, tts: false, sttModel: "nova-2" } satisfies VoiceStatus);
+    expect(app.voice).toEqual({
+      stt: false,
+      tts: false,
+      sttModel: "nova-2",
+      // 没注入 Edge 桩、也没探测 → 中文合成不可用（回退浏览器，正常态）
+      ttsZh: false,
+    } satisfies VoiceStatus);
     const res = await app.fetch(new Request("http://localhost/api/voice/status"));
     expect(res.status).toBe(200);
-    expect(await readJson(res)).toEqual({ stt: false, tts: false, sttModel: "nova-2" });
+    expect(await readJson(res)).toEqual({ stt: false, tts: false, sttModel: "nova-2", ttsZh: false });
   });
 
   test("有 key：stt / tts 都是 true，模型固定 nova-2（中文只有它能用）", async () => {
     const { app } = appWithVoice({ DEEPGRAM_API_KEY: FAKE_KEY });
     const res = await app.fetch(new Request("http://localhost/api/voice/status"));
     expect(res.status).toBe(200);
-    expect(await readJson(res)).toEqual({ stt: true, tts: true, sttModel: "nova-2" });
+    expect(await readJson(res)).toEqual({ stt: true, tts: true, sttModel: "nova-2", ttsZh: false });
   });
 
   test("POST 不被接受（405）", async () => {
@@ -570,7 +576,7 @@ describe("createSttBridge 收尾（证伪/证实「硬断吞 final」假设）",
   });
 
   test("没配 key：WS 门禁仍是 503 not-configured（收尾逻辑不碰准入）", async () => {
-    const gate = sttUpgradeGate({ stt: false, tts: false, sttModel: "nova-2" });
+    const gate = sttUpgradeGate({ stt: false });
     expect(gate?.status).toBe(503);
     expect(await readJson(gate as Response)).toEqual({ type: "error", reason: "not-configured" });
   });
@@ -580,14 +586,14 @@ describe("createSttBridge 收尾（证伪/证实「硬断吞 final」假设）",
 
 describe("sttUpgradeGate", () => {
   test("没配 key → 503 + reason not-configured（不是静默失败）", async () => {
-    const gate = sttUpgradeGate({ stt: false, tts: false, sttModel: "nova-2" });
+    const gate = sttUpgradeGate({ stt: false });
     expect(gate).not.toBeNull();
     expect(gate?.status).toBe(503);
     expect(await readJson(gate as Response)).toEqual({ type: "error", reason: "not-configured" });
   });
 
   test("配了 key → 放行（null）", () => {
-    expect(sttUpgradeGate({ stt: true, tts: true, sttModel: "nova-2" })).toBeNull();
+    expect(sttUpgradeGate({ stt: true })).toBeNull();
   });
 
   test("没配 key 时 openSttStream 也回 null（不建上游连接）", () => {

@@ -18,6 +18,7 @@ import { Cues } from "./Cues";
 import { IllustrationLayer } from "./illustration/IllustrationLayer";
 import { StageBackdrop } from "./StageBackdrop";
 import { STATUS_LABEL, toneOf, vfxVars } from "./visuals";
+import { sceneVars, specOf } from "./scenes/spec";
 import "../styles/stage.css";
 
 const vars = (o: Record<string, string>): CSSProperties => o as CSSProperties;
@@ -55,6 +56,7 @@ export function Stage({ state, onBranchPick }: StageProps) {
           className="stage-camera"
           data-cam={camera.key}
           data-par={camera.n % 2}
+          style={vars(sceneVars(specOf(state.scene)))}
         >
           <StageBackdrop scene={state.scene} />
           <Character state={state} actionNonce={action.n} />

@@ -18,6 +18,7 @@ import type {
   SessionEvent,
   Vfx,
 } from "../../shared/protocol";
+import { isActionAllowed } from "../stage/scenes/spec";
 
 // ---------------------------------------------------------------- 视觉状态的初始值
 
@@ -83,7 +84,30 @@ export function beatId(directive: Directive, turnId: string | null = null): stri
 }
 
 /**
+ * 场景适配闸门（客户端职责）。
+ *
+ * 与「服务端白名单」的分工，写清楚免得下次有人把两层合并：
+ *  - 服务端 `src/server/scene/validate.ts`：管**枚举合法性** —— `blink` 是不是一个
+ *    存在的 Action、`cafe_night` 是不是一个存在的场景。它不懂场景语义，也不该懂。
+ *  - 这里：管**场景适配** —— 当前场景的 `spec.actions` 里有没有这个词。
+ *    `hold_cup` 在协议里是 **Pose**，所以 `action` 与 `pose` 两条指令都要过闸门。
+ * 被拦下的指令由 store 计入 `droppedActions`（诊断面板里看得见，不静默）。
+ */
+export function isDirectiveAllowed(scene: SceneState["scene"], directive: Directive): boolean {
+  switch (directive.kind) {
+    case "action":
+      return isActionAllowed(scene, directive.action);
+    case "pose":
+      return isActionAllowed(scene, directive.pose);
+    default:
+      return true;
+  }
+}
+
+/**
  * Directive → SceneState（纯函数，渲染层唯一的状态来源）。
+ * - 场景容不下的 `action` / `pose`：原样返回（连 `lastBeat` 都不动，
+ *   画面不该为一件没发生的动作重播）
  * - `pendingActions` 追加（渲染层消费后自行清空，见 `drainActions`）
  * - `vfx` 置满强度 1，由 `tickScene` 逐帧衰减
  */
@@ -92,6 +116,7 @@ export function applyDirective(
   directive: Directive,
   turnId: string | null = null,
 ): SceneState {
+  if (!isDirectiveAllowed(scene.scene, directive)) return scene;
   const lastBeat = beatId(directive, turnId);
   switch (directive.kind) {
     case "emotion":
@@ -247,7 +272,7 @@ export function reduceBargeIn(machine: SessionMachine): SessionMachine {
   };
 }
 
-export type ApplyOutcome = "applied" | "stale-epoch" | "stale-turn";
+export type ApplyOutcome = "applied" | "stale-epoch" | "stale-turn" | "action-not-in-scene";
 
 export interface ApplyResult {
   machine: SessionMachine;
@@ -305,6 +330,10 @@ export function reduceEvent(
     }
 
     case "directive":
+      // 场景适配：这个场景容不下的动作/姿势在这里就被丢掉，并让上层看得见（→ droppedActions）
+      if (!isDirectiveAllowed(machine.scene.scene, event.directive)) {
+        return { machine, outcome: "action-not-in-scene" };
+      }
       return {
         machine: {
           ...machine,

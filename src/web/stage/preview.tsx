@@ -92,8 +92,28 @@ function Row({
   );
 }
 
+/**
+ * 截图 / 自查用的 URL 定点（仅 dev harness 使用）：
+ *   /preview.html?nopanel&scene=cafe_closing&pose=hold_cup&emotion=warm
+ * 缺省值逐字段等于 INITIAL，所以不带参数时渲染结果与之前完全一致。
+ */
+function seedFromUrl(): SceneState {
+  if (typeof window === "undefined") return INITIAL;
+  const query = new URLSearchParams(window.location.search);
+  const pick = <T extends string>(key: string, allowed: readonly T[], fallback: T): T => {
+    const raw = query.get(key);
+    return raw && (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback;
+  };
+  return {
+    ...INITIAL,
+    scene: pick("scene", SCENES, INITIAL.scene),
+    pose: pick("pose", POSES, INITIAL.pose),
+    emotion: pick("emotion", EMOTIONS, INITIAL.emotion),
+  };
+}
+
 function Preview() {
-  const [state, setState] = useState<SceneState>(INITIAL);
+  const [state, setState] = useState<SceneState>(seedFromUrl);
   const [auto, setAuto] = useState(false);
   const beatId = useRef(0);
   const tour = useRef(0);

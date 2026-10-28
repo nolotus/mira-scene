@@ -85,7 +85,11 @@ export function App() {
     void fetchVoiceStatus().then((status) => {
       if (!alive) return;
       setVoiceStatus(status);
-      reportVoiceChannel({ tts: status?.tts ? "deepgram" : "browser" });
+      // 两档分别上报：中文看 Edge CLI，英文看 Deepgram key
+      reportVoiceChannel({
+        ttsZh: status?.ttsZh ? "edge" : "browser",
+        tts: status?.tts ? "deepgram" : "browser",
+      });
     });
     return () => {
       alive = false;
@@ -100,6 +104,8 @@ export function App() {
         onSegment: setSpeakingSegment,
         // 分句现查：status 可能比第一句话晚到，也可能中途变了
         getStatus: () => voiceStatusRef.current,
+        // 第一次用上本机合成音时在诊断区说明一句（不打断对话、不弹窗）
+        onBrowserFallback: (reason) => reportVoiceChannel({ ttsNote: reason }),
       }),
     [boot],
   );

@@ -681,11 +681,24 @@
      .char-reach      ── 别头发时抬起的手臂（前景）
 */
 
+/* ------------------------------------------------------------------ 光照 / 地平线契约
+
+   角色不再硬编码自己的站位与光色，改由 SceneSpec 供给（见 scenes/spec.ts）：
+
+     --char-bottom        脚底位置（= camera.horizonY）          默认 30%
+     --char-height        角色高度（由地平线标定，见 charBoxOf）  默认 56%
+     --key-color          主光颜色（吊灯暖光，照在手里那杯上）      默认 #ffe6bd
+     --fill-color         补光颜色（窗外冷光，填出轮廓边）          默认 #9ec6ec
+     --rim-strength       轮廓光强度倍率 0..1                        默认 1
+
+   所有默认值都抄自改造前的硬编码值：不传变量的场景与改造前逐像素一致。
+*/
+
 .char {
   position: absolute;
-  bottom: 30%;
+  bottom: var(--char-bottom, 30%);
   left: 50%;
-  height: 56%;
+  height: var(--char-height, 56%);
   aspect-ratio: 400 / 560;
   translate: -50% 0;
   will-change: transform;

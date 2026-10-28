@@ -14,7 +14,7 @@ import { clipPhaseLabel } from "../stage/clip/clipState";
 import { useIllustrationRecords, useIllustrationState } from "../stage/illustration/illustrationRuntime";
 import { illustrationPhaseLabel } from "../stage/illustration/illustrationState";
 import { useVoiceChannel } from "../voice/voiceDiag";
-import { sttChannelLabel, ttsTierLabel } from "../voice/voiceStatus";
+import { sttChannelLabel, ttsTierLabel, ttsZhLabel } from "../voice/voiceStatus";
 import type { DemoFlags } from "./demo";
 
 export interface DiagnosticsProps {
@@ -61,6 +61,11 @@ export function Diagnostics(props: DiagnosticsProps) {
     ["本轮总耗时", fmtMs(view.latency?.totalMs), "请求发出到 turn.end"],
     ["丢弃迟到事件", String(view.droppedEvents), "epoch 护栏拦下的旧轮事件（打断链路证据）"],
     [
+      "场景外动作",
+      String(view.droppedActions),
+      "指令枚举合法、但当前场景的 spec.actions 里没有这个词（客户端按场景丢弃；服务端白名单只管枚举合法性）",
+    ],
+    [
       "当前模式",
       view.session ? (view.session.mode === "live" ? "真模型" : "Mock 导演") : "未连接",
       view.session?.directorName ?? "—",
@@ -73,10 +78,12 @@ export function Diagnostics(props: DiagnosticsProps) {
     ["语音识别", props.speechSupported ? "可用" : "不支持"],
     [
       "语音通道",
-      `STT=${sttChannelLabel(voice.stt)} · TTS=${ttsTierLabel(voice.tts)}`,
-      voice.reason
-        ? `已回退：${voice.reason}`
-        : "Deepgram 经服务端代理（key 不进浏览器）；未配置 key 时回退 Web Speech / 浏览器 TTS",
+      `STT=${sttChannelLabel(voice.stt)} · TTS(中文)=${ttsZhLabel(voice.ttsZh)} · TTS(英文)=${ttsTierLabel(voice.tts)}`,
+      voice.ttsNote
+        ? `中文：${voice.ttsNote}`
+        : voice.reason
+          ? `已回退：${voice.reason}`
+          : "中文走本机 Edge（角色音色，首次出声约 1.7–2s）；英文经服务端代理 Deepgram Aura；不可用时回退浏览器合成音",
     ],
     ["演示模式", props.demo.active ? `开（?demo=${props.demo.raw}）` : "关"],
     ["轮次", String(view.turns)],

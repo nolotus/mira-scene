@@ -70,6 +70,12 @@ export interface SessionView {
   draft: string;
   /** 被 epoch 护栏丢掉的迟到事件数（打断链路的可见证据） */
   droppedEvents: number;
+  /**
+   * 被场景适配闸门丢掉的指令数：指令枚举本身合法，只是当前场景的 spec.actions
+   * 里没有这个词（例如海边场景收到 hold_cup）。与 droppedEvents 分开计数 ——
+   * 两者的成因和修法完全不同（一个是时序，一个是场景数据）。
+   */
+  droppedActions: number;
   /** 因「已有一轮在进行」而被丢弃的提交数（并发闸门的可见证据） */
   droppedSubmits: number;
   turns: number;
@@ -152,6 +158,8 @@ export class SessionStore {
   private sttLang: SttLang = "zh-CN";
   private draft = "";
   private droppedEvents = 0;
+  /** 场景适配闸门丢掉的指令（见 SessionView.droppedActions） */
+  private droppedActions = 0;
   private droppedSubmits = 0;
   /** 「准备期」占用标记：从 submit 入口到请求真正发出为止，同一时刻只允许一个提交 */
   private startingTurn = false;
@@ -202,6 +210,7 @@ export class SessionStore {
       sttLang: this.sttLang,
       draft: this.draft,
       droppedEvents: this.droppedEvents,
+      droppedActions: this.droppedActions,
       droppedSubmits: this.droppedSubmits,
       turns: this.turns,
       latency: this.latency,
@@ -568,6 +577,12 @@ export class SessionStore {
     }
 
     const { machine, outcome } = reduceEvent(this.machine, event, this.clock());
+    if (outcome === "action-not-in-scene") {
+      // 指令合法但与场景不符（场景适配层拦下的）：单独计数，不与迟到事件混在一起
+      this.droppedActions += 1;
+      this.emit();
+      return;
+    }
     if (outcome !== "applied") {
       this.droppedEvents += 1;
       this.emit();

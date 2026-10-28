@@ -1,18 +1,26 @@
 /**
- * 语音合成（TTS）代理：Deepgram `/v1/speak`。
+ * 语音合成（TTS）：Deepgram `/v1/speak` 代理 + 按语言分流的路由层 + 字节缓存。
  *
- * 为什么只放英文过：
- * Deepgram 的 Aura 音色（aura-asteria-en）只有英语模型。把中文文本喂进去**不报错**，
- * 它照样回一段 MP3 —— 只是那段音是废的（实测 round-trip 转回来是「位于市政府」）。
- * 所以语言过滤必须发生在**发上游之前**：含 CJK 直接 400，让客户端回退浏览器 TTS。
- * 这一层宁可多说一句 no，也不让用户听到一段听不懂的声音。
+ * 两层结构：
+ *  - `createTtsProxy`：**只做英文**的 Deepgram Aura 代理（原有行为，一字未改）。
+ *  - `createTtsRouter`：`/api/tts` 的真正实现。含 CJK 走 Edge TTS（见 edgeTts.ts），
+ *    纯英文走上面那个代理；两者都按 `sha256(voice + text)` 命中同一份内存 LRU。
+ *
+ * 为什么 Deepgram 只放英文过：
+ * Deepgram 的 Aura 音色（aura-asteria-en）只有英语模型，`/v1/models` 里 103 个音色
+ * 的语言只有 de/en/es/fr/it/ja/nl —— **没有中文**。把中文文本喂进去**不报错**，
+ * 它照样回一段 MP3，只是那段音是废的（实测 round-trip 转回来是「外媒体验再次一码」conf=0.56）。
+ * 所以代理层仍然自带 400 拦截：即使上层路由哪天接错，Aura 也不会收到中文。
  *
  * 为什么必须代理而不能让浏览器直连：
  * 直连需要把 key 交给浏览器。本 key 又没有 `POST /v1/auth/grant` 权限（实测 403），
  * 签不出短时 token，所以**没有安全的浏览器直连方案**，只能服务端代理。
  *
- * 密钥纪律：key 只在内存里拼 header，绝不进响应、日志、错误信息。
+ * 密钥纪律：key 只在内存里拼 header，绝不进响应、日志、错误信息。文本同样不进日志。
  */
+
+import { createHash } from "node:crypto";
+import type { EdgeTtsSynthesizer } from "./edgeTts.ts";
 
 /** 唯一支持的合成模型（英语） */
 export const DEEPGRAM_SPEAK_MODEL = "aura-asteria-en";
@@ -25,7 +33,9 @@ export type TtsReason =
   | "text-required"
   | "text-too-long"
   | "not-configured"
-  | "upstream-error";
+  | "upstream-error"
+  /** Edge TTS 这条路：CLI 不存在 / 超时 / 非 0 退出 / 排队超时 —— 客户端据此回退浏览器 TTS */
+  | "tts-unavailable";
 
 export interface TtsConfig {
   apiKey: string;
@@ -137,6 +147,180 @@ export function createTtsProxy(options: TtsProxyOptions): TtsProxy {
       } finally {
         clearTimeout(timer);
       }
+    },
+  };
+}
+
+// ================================================================== 字节缓存
+
+/** 缓存条数上限的默认值：一句 ≤400 字、MP3 约 20–30KB，128 条约 3MB —— 够用且不失控 */
+export const DEFAULT_TTS_CACHE_ENTRIES = 128;
+
+export interface CachedAudio {
+  bytes: Uint8Array;
+  mime: string;
+}
+
+export interface TtsCache {
+  get(key: string): CachedAudio | undefined;
+  set(key: string, value: CachedAudio): void;
+  readonly size: number;
+  /** 命中/未命中次数（日志与单测用） */
+  readonly hits: number;
+  readonly misses: number;
+}
+
+/**
+ * 内存 LRU（条数上限）。`get` 会把命中的键挪到队尾，`set` 超出上限就丢队首。
+ * 只存字节，不存文本 —— 键是 sha256，所以缓存本身也不留原文。
+ */
+export function createTtsCache(maxEntries = DEFAULT_TTS_CACHE_ENTRIES): TtsCache {
+  const limit = Math.max(1, Math.floor(maxEntries));
+  const store = new Map<string, CachedAudio>();
+  let hits = 0;
+  let misses = 0;
+
+  return {
+    get(key) {
+      const value = store.get(key);
+      if (!value) {
+        misses += 1;
+        return undefined;
+      }
+      hits += 1;
+      // 重新插入 = 挪到队尾（Map 保持插入顺序）
+      store.delete(key);
+      store.set(key, value);
+      return value;
+    },
+    set(key, value) {
+      if (store.has(key)) store.delete(key);
+      store.set(key, value);
+      while (store.size > limit) {
+        const oldest = store.keys().next();
+        if (oldest.done) break;
+        store.delete(oldest.value);
+      }
+    },
+    get size() {
+      return store.size;
+    },
+    get hits() {
+      return hits;
+    },
+    get misses() {
+      return misses;
+    },
+  };
+}
+
+/** 缓存键：`sha256(voice + text)`。voice 参与哈希，所以换音色不会串音。 */
+export function ttsCacheKey(voice: string, text: string): string {
+  return createHash("sha256").update(`${voice}\n${text}`).digest("hex");
+}
+
+// ================================================================== 路由层
+
+export interface TtsRouterOptions {
+  /** 英文那一路：Deepgram Aura 代理（null = 没配 key） */
+  deepgram: TtsProxy | null;
+  /** 中文那一路：Edge TTS（null = 没装 CLI / 显式关闭） */
+  edge: EdgeTtsSynthesizer | null;
+  cache?: TtsCache;
+  cacheEntries?: number;
+  /** 只喂 voice / 字节数 / 耗时 / 命中与否，绝不喂文本 */
+  log?: (line: string) => void;
+}
+
+export interface TtsRouter extends TtsProxy {
+  /** 两条路各自可用性（诊断用，不含任何凭据） */
+  readonly routes: { english: boolean; chinese: boolean };
+  readonly cache: TtsCache;
+}
+
+/** `lang` 只做入参校验，不参与分流 —— 原因见 createTtsRouter 里的注释 */
+function parseLang(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  return trimmed && trimmed.length <= 16 ? trimmed : null;
+}
+
+/**
+ * `/api/tts` 的实现：按文本语言分流 + 共用一份字节缓存。
+ *
+ * 分流判据只有一个：**文本里有没有 CJK**。
+ * 为什么不看客户端传的 `lang`：客户端 UI 语言默认是 `zh-CN`，用它来判会把纯英文句子
+ * 也送进 Edge（双语混排时音色来回跳），而「英文走 Aura、中文走 Edge」是产品定死的。
+ * 所以 `lang` 目前只被接受（并为将来预留）而不改变路由 —— 有单测钉住这一点。
+ */
+export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
+  const cache = options.cache ?? createTtsCache(options.cacheEntries);
+  const log = options.log ?? (() => {});
+  const { deepgram, edge } = options;
+
+  async function synthesizeEdge(text: string): Promise<TtsResult> {
+    if (!edge || !edge.available) {
+      log(`[tts] route=zh voice=none reason=tts-unavailable`);
+      return { ok: false, status: 503, reason: "tts-unavailable" };
+    }
+    // 缓存键必须含 rate/pitch：改了角色语速/音高还命中旧缓存，等于参数白改
+    const voice = edge.voice;
+    const key = ttsCacheKey(`edge:${voice}:${edge.rate}:${edge.pitch}`, text);
+    const cached = cache.get(key);
+    if (cached) {
+      log(`[tts] route=zh voice=${voice} bytes=${cached.bytes.byteLength} cache=hit`);
+      return { ok: true, bytes: cached.bytes, mime: cached.mime };
+    }
+    const started = performance.now();
+    const result = await edge.synthesize(text);
+    const ms = Math.round(performance.now() - started);
+    if (!result.ok) {
+      log(`[tts] route=zh voice=${voice} reason=${result.reason} ${ms}ms`);
+      return { ok: false, status: 503, reason: "tts-unavailable" };
+    }
+    cache.set(key, { bytes: result.bytes, mime: result.mime });
+    log(`[tts] route=zh voice=${voice} bytes=${result.bytes.byteLength} ${ms}ms cache=miss`);
+    return { ok: true, bytes: result.bytes, mime: result.mime };
+  }
+
+  async function synthesizeEnglish(text: string): Promise<TtsResult> {
+    if (!deepgram || !deepgram.configured) {
+      return { ok: false, status: 503, reason: "not-configured" };
+    }
+    const key = ttsCacheKey(`deepgram:${DEEPGRAM_SPEAK_MODEL}`, text);
+    const cached = cache.get(key);
+    if (cached) {
+      log(`[tts] route=en bytes=${cached.bytes.byteLength} cache=hit`);
+      return { ok: true, bytes: cached.bytes, mime: cached.mime };
+    }
+    const result = await deepgram.synthesize({ text });
+    if (!result.ok) return result;
+    cache.set(key, { bytes: result.bytes, mime: result.mime });
+    return result;
+  }
+
+  return {
+    cache,
+
+    get routes() {
+      return { english: deepgram?.configured === true, chinese: edge?.available === true };
+    },
+
+    get configured() {
+      return deepgram?.configured === true || edge?.available === true;
+    },
+
+    async synthesize(raw: unknown): Promise<TtsResult> {
+      const record = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : null;
+      const text = record?.text;
+      if (typeof text !== "string") return { ok: false, status: 400, reason: "text-required" };
+      if (!text.trim()) return { ok: false, status: 400, reason: "text-required" };
+      if (text.length > MAX_TTS_CHARS) return { ok: false, status: 400, reason: "text-too-long" };
+      // 只为「格式不对的请求被挡住」而解析，不参与分流
+      const lang = parseLang(record?.lang);
+      const routed = containsCjk(text) ? "zh" : "en";
+      log(`[tts] route=${routed} lang=${lang ?? "-"} chars=${text.length}`);
+      return routed === "zh" ? synthesizeEdge(text) : synthesizeEnglish(text);
     },
   };
 }

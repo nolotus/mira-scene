@@ -8,8 +8,11 @@
 
 export interface VoiceStatus {
   stt: boolean;
+  /** Deepgram key 是否配置（英文合成 + 语音识别） */
   tts: boolean;
   sttModel: string;
+  /** 本地 `edge-tts` CLI 是否可用（中文合成；服务端启动时探测一次） */
+  ttsZh: boolean;
 }
 
 export function parseVoiceStatus(raw: unknown): VoiceStatus | null {
@@ -19,6 +22,8 @@ export function parseVoiceStatus(raw: unknown): VoiceStatus | null {
     stt: record.stt === true,
     tts: record.tts === true,
     sttModel: typeof record.sttModel === "string" ? record.sttModel : "nova-2",
+    // 老服务端没有这个字段 → false → 中文回退浏览器（保守但永远可用）
+    ttsZh: record.ttsZh === true,
   };
 }
 
@@ -36,15 +41,24 @@ export async function fetchVoiceStatus(
 }
 
 export type SttChannel = "deepgram" | "webspeech" | "none";
+/** 英文合成档位（Deepgram Aura / 浏览器） */
 export type TtsTier = "deepgram" | "browser";
+/** 中文合成档位（Edge 本机 CLI / 浏览器） */
+export type ZhTtsTier = "edge" | "browser";
 
-/** 诊断区文案：STT=Deepgram/WebSpeech/无 · TTS=Deepgram/浏览器 */
+/** 诊断区文案：STT=Deepgram/WebSpeech/无 */
 export function sttChannelLabel(channel: SttChannel): string {
   if (channel === "deepgram") return "Deepgram";
   if (channel === "webspeech") return "WebSpeech";
   return "无";
 }
 
+/** 诊断区文案：TTS(英文)=Deepgram/浏览器 */
 export function ttsTierLabel(tier: TtsTier): string {
   return tier === "deepgram" ? "Deepgram" : "浏览器";
+}
+
+/** 诊断区文案：TTS(中文)=Edge/浏览器 */
+export function ttsZhLabel(tier: ZhTtsTier): string {
+  return tier === "edge" ? "Edge" : "浏览器";
 }

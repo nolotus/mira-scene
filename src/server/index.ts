@@ -11,10 +11,30 @@
 import { createApp, sttUpgradeGate } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { directorModeOf } from "./director/index.ts";
+import { createEdgeTtsSynthesizer } from "./edgeTts.ts";
 import { parseSttControl, type SttBridge } from "./stt.ts";
 
 const config = loadConfig();
-const app = createApp({ config });
+
+/**
+ * 中文语音合成（Edge CLI）的可用性**只探这一次**：`edge-tts --version`，2s 上限，结果缓存。
+ *
+ * 为什么在入口而不是 createApp 里：探测要 spawn 进程，而测试会大量调用 createApp ——
+ * 「建个 app 就起进程」既慢又违反测试不 spawn 的纪律。放在入口还保证了一件事：
+ * `/api/voice/status` 从**第一条请求**起就是真话（客户端只在启动时取一次能力）。
+ * 探测失败不是启动失败：`ttsZh:false`，中文回退浏览器 TTS。
+ */
+const edge = createEdgeTtsSynthesizer({
+  bin: config.edgeTts.bin,
+  voice: config.edgeTts.voice,
+  rate: config.edgeTts.rate,
+  pitch: config.edgeTts.pitch,
+  // 只有 voice / 字节数 / 耗时 / 失败类别，永远没有文本
+  log: (line) => console.log(line),
+});
+await edge.probe();
+
+const app = createApp({ config, edge });
 
 /** ws → 它那条上游桥。close 时必须 delete，否则一次说话漏一条上游连接。 */
 const bridges = new Map<unknown, SttBridge>();
@@ -94,7 +114,7 @@ try {
 
 const mode = directorModeOf(app.director);
 const llmLabel = config.llm ? `${config.llm.label}/${config.llm.model}` : "none(keyless)";
-const voiceLabel = `stt=${app.voice.stt ? app.voice.sttModel : "off"} tts=${app.voice.tts ? "on" : "off"}`;
+const voiceLabel = `stt=${app.voice.stt ? app.voice.sttModel : "off"} tts=${app.voice.tts ? "on" : "off"} ttsZh=${app.voice.ttsZh ? `${config.edgeTts.voice}(${config.edgeTts.rate}/${config.edgeTts.pitch})` : "off"}`;
 console.log(`[server] listening on http://localhost:${server.port}`);
 console.log(`[server] director=${app.director.name} mode=${mode} keyless=${mode === "mock"} llm=${llmLabel} voice(${voiceLabel})`);
 

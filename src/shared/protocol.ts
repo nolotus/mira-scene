@@ -58,8 +58,15 @@ export type Vfx =
   | "lights_dim" // 灯光变暗（打烊）
   | "steam_wisp"; // 咖啡热气
 
-/** 场景/环境变化（题目要求至少 1 次背景、镜头或环境变化） */
-export type SceneVariant = "cafe_night" | "cafe_closing" | "window_rain";
+/**
+ * 场景/环境变化（题目要求至少 1 次背景、镜头或环境变化）
+ *
+ * 客户端认识四种 id，其中 `seaside_dawn` 是**示例场景**：它在 `scenes/spec.ts` 里有
+ * 完整的数据（用来证明「加地点 = 加数据」），但还没有渲染器、也不进任何选择器 UI。
+ * 服务端的场景白名单（src/server/scene/validate.ts）**故意不放行它**：
+ * 那是枚举合法性层，这里多一个 id 不会让模型凭空切到没有渲染器的场景。
+ */
+export type SceneVariant = "cafe_night" | "cafe_closing" | "window_rain" | "seaside_dawn";
 
 /** 剧情分支选项（可选，非必须项） */
 export interface Branch {

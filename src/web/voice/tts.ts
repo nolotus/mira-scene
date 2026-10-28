@@ -1,16 +1,22 @@
 /**
  * 语音输出（TTS）。
  *
- * 两个 Provider，同一个接口：
- *  - BrowserTTS：speechSynthesis，零密钥默认路径。把字幕增量按句切分入队朗读，
- *    所以「说」的节奏天然跟着字幕走。**这是唯一验证过的语音路径。**
- *  - StreamTTS：消费协议里的 audio.chunk（base64 → ArrayBuffer → WebAudio）。
- *    状态：**协议已预留，未接入真实服务商，未用真实音频验证**（解码/排队/取消是
- *    可读的实现 + 单测覆盖 base64 解码，但从未跑过真实音频分片）。
- *    服务端当前不产出分片，所以 `?audio=stream` 只会走「无分片时回退 BrowserTTS」这条分支。
+ * 三个 Provider，同一个接口：
+ *  - BrowserTTS：speechSynthesis，零密钥默认路径（也是所有失败路径的兜底）。
+ *    把字幕增量按句切分入队朗读，所以「说」的节奏天然跟着字幕走。
+ *  - StreamTTS：消费 audio.chunk（base64 → ArrayBuffer → WebAudio）。
+ *    解码/排队/取消是完备实现且被单测覆盖，但**从未用真实 MP3 验证过解码播放**（见报告）。
+ *  - RoutedTTS：按分句选路（中文→Edge / 英文→Deepgram / 其余→浏览器），
+ *    内部是 2 槽有序流水线：当前句在播时，下一句的合成已经在路上。
  *
- * 两者都必须做到：`cancel()` 同步、立即、彻底 —— 打断发生时不允许再冒出半个字。
+ * 三者都必须做到：`cancel()` 同步、立即、彻底 —— 打断发生时不允许再冒出半个字。
  */
+
+import {
+  CHARACTER_VOICE,
+  browserPitchOf,
+  browserRateOf,
+} from "../../shared/characterVoice";
 
 export type AudioMode = "browser" | "stream";
 
@@ -593,20 +599,28 @@ export function containsCjk(text: string): boolean {
   return CLIENT_CJK.test(text);
 }
 
-export type VoiceTtsTier = "deepgram" | "browser";
+export type VoiceTtsTier = "edge" | "deepgram" | "browser";
+
+/** 路由层看到的能力：中文看 `ttsZh`（Edge CLI），英文看 `tts`（Deepgram key） */
+export interface TtsCapability {
+  tts: boolean;
+  ttsZh?: boolean;
+}
 
 /**
- * 分句级的 Provider 选择。判据只有两条，顺序不能换：
- *   1. 含 CJK → **永远** 浏览器（Aura 只有英语，中文合成出来是废音 —— 服务端也会 400 拦一遍）
- *   2. 纯英文且 status 说 tts 可用 → Deepgram
- * 其余（未配置 / status 还没到 / 空串）→ 浏览器。默认永远是可用的那一条。
+ * 分句级的 Provider 选择。判据三条，顺序不能换：
+ *   1. 含 CJK → `ttsZh` 可用就走 **Edge**（本机 CLI，唯一有中文音色的方案），否则浏览器
+ *   2. 纯英文且 `tts` 可用 → Deepgram Aura
+ *   3. 其余（未配置 / status 还没到 / 空串）→ 浏览器。默认永远是可用的那一条。
+ *
+ * CJK 永远不会落到 Deepgram：Aura 只有英语模型，出来的是废音（服务端也会拦一道）。
  */
 export function selectTtsChannel(
   text: string,
-  status: { tts: boolean } | null | undefined,
+  status: TtsCapability | null | undefined,
 ): VoiceTtsTier {
   if (!text.trim()) return "browser";
-  if (containsCjk(text)) return "browser";
+  if (containsCjk(text)) return status?.ttsZh === true ? "edge" : "browser";
   return status?.tts === true ? "deepgram" : "browser";
 }
 
@@ -657,8 +671,29 @@ export interface RoutedTtsOptions {
   lang?: string;
   onSegment?: (text: string) => void;
   /** 每个分句现查一次：status 可能比第一句话更晚到 */
-  getStatus?: () => { tts: boolean } | null;
+  getStatus?: () => TtsCapability | null;
   speakRequest?: SpeakRequest;
+  /**
+   * 第一次用上「本机合成音」时回调一次（诊断区用它说明「非角色音色」）。
+   * 只在首句触发，不打断对话、不弹窗。
+   */
+  onBrowserFallback?: (reason: string) => void;
+}
+
+/** 同时在飞的合成请求数：1 个当前句 + 1 个预取。服务端也限 2 个 CLI 进程，正好对齐。 */
+const MAX_SYNTH_INFLIGHT = 2;
+
+interface SynthJob {
+  /** 句序号（入队序），交付顺序以它为准 */
+  order: number;
+  text: string;
+  tier: "edge" | "deepgram";
+}
+
+interface SynthOutcome {
+  ok: boolean;
+  bytes?: ArrayBuffer;
+  reason: string;
 }
 
 /**
@@ -673,22 +708,37 @@ export class RoutedTTS implements TTSProvider {
   private buffer = "";
   private generation = 0;
   private seq = 0;
-  private inflight = 0;
   private lastErrorValue: string | null = null;
+  /** 待合成队列（按句序）：预取 = 让队首两个同时在飞 */
+  private readonly synthQueue: SynthJob[] = [];
+  private synthInflight = 0;
+  /** 下一个入队的序号 */
+  private synthOrder = 0;
+  /** 下一个「按序交付」的序号：乱序先完成的结果在这里等前一句 */
+  private synthHead = 0;
+  private readonly synthReady = new Map<number, { job: SynthJob; outcome: SynthOutcome }>();
+  private browserNoticeSent = false;
   private readonly lang: string;
   private readonly onSegment: ((text: string) => void) | null;
-  private readonly getStatus: () => { tts: boolean } | null;
+  private readonly getStatus: () => TtsCapability | null;
   private readonly speakRequest: SpeakRequest;
+  private readonly onBrowserFallback: ((reason: string) => void) | null;
 
   constructor(options: RoutedTtsOptions = {}) {
     this.lang = options.lang ?? "zh-CN";
     this.onSegment = options.onSegment ?? null;
     this.getStatus = options.getStatus ?? (() => null);
     this.speakRequest = options.speakRequest ?? createSpeakRequest();
+    this.onBrowserFallback = options.onBrowserFallback ?? null;
   }
 
   get name(): string {
-    return this.getStatus()?.tts === true ? "deepgram+browser" : "browser";
+    const status = this.getStatus();
+    const tiers: string[] = [];
+    if (status?.ttsZh === true) tiers.push("edge");
+    if (status?.tts === true) tiers.push("deepgram");
+    tiers.push("browser");
+    return tiers.join("+");
   }
 
   /** 最近一次 Deepgram 合成失败的原因（UI/诊断可读；内容不含凭据） */
@@ -700,13 +750,15 @@ export class RoutedTTS implements TTSProvider {
     return (
       (this.browser?.isSpeaking ?? false) ||
       (this.stream?.isSpeaking ?? false) ||
-      this.inflight > 0
+      this.synthInflight > 0 ||
+      this.synthReady.size > 0
     );
   }
 
   /** 必须在用户手势里调一次：StreamTTS 的 AudioContext 不能在后台悄悄创建 */
   warmUp(): void {
-    if (this.getStatus()?.tts !== true) return;
+    const status = this.getStatus();
+    if (status?.tts !== true && status?.ttsZh !== true) return;
     this.ensureStream().warmUp();
   }
 
@@ -731,7 +783,12 @@ export class RoutedTTS implements TTSProvider {
   cancel(): void {
     this.generation += 1;
     this.buffer = "";
-    this.inflight = 0;
+    // 流水线整体作废：队列清空，在飞的结果因 generation 不符被丢弃
+    this.synthQueue.length = 0;
+    this.synthInflight = 0;
+    this.synthReady.clear();
+    this.synthHead = this.synthOrder;
+    this.browserNoticeSent = false;
     this.browser?.cancel();
     this.stream?.cancel();
   }
@@ -747,41 +804,94 @@ export class RoutedTTS implements TTSProvider {
   // ------------------------------------------------------------ 内部
 
   private dispatch(segment: string): void {
-    if (selectTtsChannel(segment, this.getStatus()) === "browser") {
+    const tier = selectTtsChannel(segment, this.getStatus());
+    if (tier === "browser") {
+      // 走到这里说明没有服务端音色可用：本机合成音，首句在诊断区说明一次
+      this.noticeBrowserFallback(containsCjk(segment) ? "本机合成音（非角色音色）" : "浏览器合成音");
       this.ensureBrowser().speak(segment);
       return;
     }
-    void this.playDeepgram(segment);
+    this.synthQueue.push({ order: this.synthOrder, text: segment, tier });
+    this.synthOrder += 1;
+    this.pumpSynth();
   }
 
-  private async playDeepgram(segment: string): Promise<void> {
+  /**
+   * 2 槽流水线：发出去就不再等回来。
+   * Edge 每句要 1.7–2.0s，第 1 句在播的时候第 2 句的请求已经在路上 ——
+   * 这段合成时间被播放时间遮住了，用户听到的是「一句接一句」，不是「一句一等」。
+   */
+  private pumpSynth(): void {
+    while (this.synthInflight < MAX_SYNTH_INFLIGHT && this.synthQueue.length > 0) {
+      const job = this.synthQueue.shift();
+      if (!job) break;
+      this.synthInflight += 1;
+      void this.runSynth(job);
+    }
+  }
+
+  private async runSynth(job: SynthJob): Promise<void> {
     const generation = this.generation;
-    this.inflight += 1;
-    let result: SpeakRequestResult;
+    let outcome: SynthOutcome;
     try {
-      result = await this.speakRequest(segment);
-    } finally {
-      this.inflight = Math.max(0, this.inflight - 1);
+      const result = await this.speakRequest(job.text);
+      outcome = result.ok
+        ? { ok: true, bytes: result.bytes, reason: "" }
+        : { ok: false, reason: result.reason };
+    } catch (err) {
+      outcome = { ok: false, reason: err instanceof Error ? err.message : "network" };
     }
-    // 打断之后回来的音频：解码了也不许响
+    // 打断之后回来的音频：不占槽、不入队、不出声（cancel 已经把计数器清零）
     if (generation !== this.generation) return;
-    if (!result.ok) {
-      // 服务端说「不支持」（400）或上游失败（502）→ 浏览器兜住，宁可换个嗓子也不静音
-      this.lastErrorValue = `deepgram tts: ${result.reason}`;
-      this.ensureBrowser().speak(segment);
-      return;
+    this.synthInflight = Math.max(0, this.synthInflight - 1);
+    this.synthReady.set(job.order, { job, outcome });
+    this.flushSynth();
+    this.pumpSynth();
+  }
+
+  /**
+   * 只按句序连续交付：乱序先完成的那句在这里等前一句落定，
+   * 否则播放顺序会跟字幕对不上（两个预取槽就必然出现乱序）。
+   */
+  private flushSynth(): void {
+    for (;;) {
+      const entry = this.synthReady.get(this.synthHead);
+      if (!entry) break;
+      this.synthReady.delete(this.synthHead);
+      this.synthHead += 1;
+      if (!entry.outcome.ok || !entry.outcome.bytes) {
+        // 预取/合成失败只降级**这一句**：下一句该走 Edge 还走 Edge，不整轮降级
+        this.lastErrorValue = `${entry.job.tier} tts: ${entry.outcome.reason}`;
+        this.noticeBrowserFallback(`合成失败改本机音（${entry.outcome.reason}）`);
+        this.ensureBrowser().speak(entry.job.text);
+        continue;
+      }
+      this.seq += 1;
+      this.ensureStream().pushChunk({
+        seq: this.seq,
+        dataUrl: `data:audio/mpeg;base64,${arrayBufferToBase64(entry.outcome.bytes)}`,
+        mime: "audio/mpeg",
+      });
     }
-    this.seq += 1;
-    this.ensureStream().pushChunk({
-      seq: this.seq,
-      dataUrl: `data:audio/mpeg;base64,${arrayBufferToBase64(result.bytes)}`,
-      mime: "audio/mpeg",
-    });
+  }
+
+  private noticeBrowserFallback(reason: string): void {
+    if (this.browserNoticeSent) return;
+    this.browserNoticeSent = true;
+    this.onBrowserFallback?.(reason);
   }
 
   private ensureBrowser(): BrowserTTS {
     if (!this.browser) {
-      this.browser = new BrowserTTS({ lang: this.lang, onSegment: this.onSegment ?? undefined });
+      // 回退音色也尽量贴住角色档案：语速/音高按近似换算（browserRateOf/browserPitchOf），
+      // 音色靠 BrowserTTS 内部的 zh-CN 优先匹配。注意这里用的是编译期默认档案：
+      // 客户端的 env 覆盖拿不到，服务端调过 EDGE_TTS_* 时浏览器这一路不会跟着变。
+      this.browser = new BrowserTTS({
+        lang: this.lang,
+        rate: browserRateOf(CHARACTER_VOICE.rate),
+        pitch: browserPitchOf(CHARACTER_VOICE.pitch),
+        onSegment: this.onSegment ?? undefined,
+      });
     }
     return this.browser;
   }

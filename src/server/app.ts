@@ -32,13 +32,20 @@ import {
   type SttBridge,
   type UpstreamConnect,
 } from "./stt.ts";
-import { createTtsProxy, type TtsProxy } from "./tts.ts";
+import { createEdgeTtsSynthesizer, type EdgeTtsSynthesizer } from "./edgeTts.ts";
+import { createTtsProxy, createTtsRouter, type TtsProxy } from "./tts.ts";
 
-/** /api/voice/status 的响应体（无 key 时两个 false 是正常态，不是错误） */
+/**
+ * /api/voice/status 的响应体。
+ * 三个 false 都是正常态，不是错误码：
+ *  - `stt` / `tts` 对应 Deepgram key（没配就 false）
+ *  - `ttsZh` 对应本地 `edge-tts` CLI（启动时 `--version` 探测的结果，缓存复用）
+ */
 export interface VoiceStatus {
   stt: boolean;
   tts: boolean;
   sttModel: string;
+  ttsZh: boolean;
 }
 
 export interface AppOptions {
@@ -50,8 +57,14 @@ export interface AppOptions {
   sessions?: SessionStore;
   /** 生成式插图服务（测试注入 stub fetch / 配额；默认按 process.env 现场创建） */
   illustrate?: IllustrationService;
-  /** 语音合成代理（测试注入 stub fetch / 假配置；默认按 config.deepgram 现场创建） */
+  /** 语音合成代理（测试注入 stub fetch / 假配置；默认按 config 现场创建路由层） */
   tts?: TtsProxy;
+  /**
+   * 中文语音合成（Edge CLI）。默认按 config.edgeTts 现场创建 ——
+   * 注意**不在 createApp 里探测**（探测会 spawn 进程，测试里建 app 不该起进程）。
+   * 生产入口 index.ts 探测好再传进来。
+   */
+  edge?: EdgeTtsSynthesizer;
   /** 上游 STT 建连函数（测试注入假 socket；默认连 wss://api.deepgram.com） */
   sttConnect?: UpstreamConnect;
 }
@@ -117,14 +130,37 @@ export function createApp(options: AppOptions = {}): App {
   // 语音：STT 与 TTS 共用同一个 Deepgram key。没配 key 时两者都「不可用」，
   // 但这是正常态 —— 文字通道与 Mock 导演完全不受影响。
   const deepgram = config.deepgram;
-  const tts =
-    options.tts ??
-    createTtsProxy({
-      config: deepgram ? { apiKey: deepgram.apiKey } : null,
-      // 上游日志由 index.ts 打开；测试里注入的 log 会盖掉默认的 console.warn
+  const edge =
+    options.edge ??
+    createEdgeTtsSynthesizer({
+      bin: config.edgeTts.bin,
+      voice: config.edgeTts.voice,
+      rate: config.edgeTts.rate,
+      pitch: config.edgeTts.pitch,
+      // 日志由 index.ts 统一开；这里默认闭嘴
       log: () => {},
     });
-  const voice: VoiceStatus = { stt: deepgram !== null, tts: tts.configured, sttModel: STT_MODEL };
+  const tts =
+    options.tts ??
+    createTtsRouter({
+      deepgram: createTtsProxy({
+        config: deepgram ? { apiKey: deepgram.apiKey } : null,
+        // 上游日志由 index.ts 打开；测试里注入的 log 会盖掉默认的 console.warn
+        log: () => {},
+      }),
+      edge,
+      cacheEntries: config.edgeTts.cacheEntries,
+    });
+  /**
+   * 每次现算：`ttsZh` 取决于探测结果，而探测在 createApp 之后才可能落定
+   * （index.ts 先 await probe 再建 app；测试里注入 stub 直接给结论）。
+   */
+  const voiceStatus = (): VoiceStatus => ({
+    stt: deepgram !== null,
+    tts: tts.configured,
+    sttModel: STT_MODEL,
+    ttsZh: edge.available,
+  });
 
   const sttConnect: UpstreamConnect =
     options.sttConnect ??
@@ -214,7 +250,7 @@ export function createApp(options: AppOptions = {}): App {
     // 没有 DEEPGRAM_API_KEY 时 stt/tts 都是 false —— 这是正常态，不是错误码。
     if (path === "/api/voice/status") {
       if (request.method !== "GET") return json({ error: "method not allowed" }, 405, origin);
-      return json(voice, 200, origin);
+      return json(voiceStatus(), 200, origin);
     }
 
     // 语音合成：成功直接回 MP3 字节（客户端塞进 StreamTTS 的播放路径）；
@@ -448,7 +484,21 @@ export function createApp(options: AppOptions = {}): App {
     });
   }
 
-  return { fetch: handleFetch, config, director, sessions, turns, illustrate, tts, voice, openSttStream, directorFor };
+  return {
+    fetch: handleFetch,
+    config,
+    director,
+    sessions,
+    turns,
+    illustrate,
+    tts,
+    // getter：探测结果可能在 app 建好之后才落定，快照会读到过期的 false
+    get voice() {
+      return voiceStatus();
+    },
+    openSttStream,
+    directorFor,
+  };
 }
 
 // ------------------------------------------------------------------ 请求解析
@@ -522,7 +572,7 @@ async function safeJson(request: Request): Promise<unknown> {
  * 没配 Deepgram → 503 + 明确的 reason（客户端据此走 Web Speech / 纯文字回退），
  * 而不是先接受连接再让客户端干等字幕。返回 null 表示可以升级。
  */
-export function sttUpgradeGate(voice: VoiceStatus): Response | null {
+export function sttUpgradeGate(voice: { stt: boolean }): Response | null {
   if (voice.stt) return null;
   return new Response(JSON.stringify({ type: "error", reason: "not-configured" }), {
     status: 503,

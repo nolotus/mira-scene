@@ -14,6 +14,9 @@
 
 import { parseDirectorRequest, type DirectorRequest } from "../shared/director.ts";
 import { resolveDirectorMode } from "./director/resolve.ts";
+import { DEFAULT_EDGE_BIN } from "./edgeTts.ts";
+import { resolveCharacterVoice } from "../shared/characterVoice.ts";
+import { DEFAULT_TTS_CACHE_ENTRIES } from "./tts.ts";
 
 export type LlmProviderId = "deepseek" | "custom";
 
@@ -46,11 +49,33 @@ export interface DeepgramConfig {
   apiKey: string;
 }
 
+/**
+ * Edge TTS（中文合成）的本地配置。
+ * 注意它**不是凭据**：`edge-tts` 是本地命令，不需要 key，所以它永远「已配置」，
+ * 是否真的可用由启动时的一次 `--version` 探测决定（结果缓存，见 edgeTts.ts）。
+ */
+export interface EdgeTtsConfig {
+  /** CLI 路径（`ETTS_BIN`，默认 `edge-tts`） */
+  bin: string;
+  /** 默认音色（`EDGE_TTS_VOICE`，默认 zh-CN-XiaoxiaoNeural） */
+  voice: string;
+  /** 角色语速（`EDGE_TTS_RATE`，默认 -8%） */
+  rate: string;
+  /** 角色音高（`EDGE_TTS_PITCH`，默认 -3Hz） */
+  pitch: string;
+  /** 音色档案的人话描述（诊断用） */
+  label: string;
+  /** 合成结果的内存 LRU 条数上限（`TTS_CACHE_MAX`） */
+  cacheEntries: number;
+}
+
 export interface ServerConfig {
   port: number;
   isProd: boolean;
   /** 语音凭据；null = 未配置（语音通道关闭，文字通道不受影响） */
   deepgram: DeepgramConfig | null;
+  /** 中文语音合成（Edge CLI）配置；无凭据，恒有值 */
+  edgeTts: EdgeTtsConfig;
   /**
    * 环境变量显式请求的档位（`DIRECTOR=live|mock`）；null = 没设置，默认 Mock。
    * 注意这只表示「环境想要什么」，会话实际用哪个档位由 resolveDirectorMode() 决定。
@@ -124,6 +149,27 @@ function toPort(raw: string | undefined): number {
   return Math.trunc(parsed);
 }
 
+/** 缓存条数：非法/缺省回默认；上限 4096，避免一条环境变量把内存撑爆 */
+function toCacheEntries(raw: string | undefined): number {
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_TTS_CACHE_ENTRIES;
+  return Math.min(4096, Math.trunc(parsed));
+}
+
+/** 读 Edge TTS 配置。无凭据、无需开关：CLI 在不在由运行时探测决定。 */
+export function resolveEdgeTtsConfig(env: Record<string, string | undefined>): EdgeTtsConfig {
+  // 音色/语速/音高来自角色档案（shared/characterVoice.ts），env 只做覆盖
+  const character = resolveCharacterVoice(env);
+  return {
+    bin: trimToNull(env.ETTS_BIN) ?? DEFAULT_EDGE_BIN,
+    voice: character.voice,
+    rate: character.rate,
+    pitch: character.pitch,
+    label: character.label,
+    cacheEntries: toCacheEntries(env.TTS_CACHE_MAX),
+  };
+}
+
 function toScale(raw: string | undefined): number {
   if (raw === undefined || raw.trim() === "") return 1;
   const parsed = Number(raw);
@@ -145,6 +191,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: toPort(env.SERVER_PORT),
     isProd: (env.NODE_ENV ?? "development").trim() === "production",
     deepgram: resolveDeepgramConfig(env),
+    edgeTts: resolveEdgeTtsConfig(env),
     directorEnvMode,
     directorMode: defaults.mode,
     llm,

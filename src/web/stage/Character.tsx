@@ -14,6 +14,7 @@ import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import type { Emotion, Pose, SceneState } from "../../shared/protocol";
 import { EMOTION_ORDER, EMOTION_SPEC, POSE_SPEC, STATUS_SPEC } from "./visuals";
+import { specOf } from "./scenes/spec";
 
 const vars = (o: Record<string, string>): CSSProperties => o as CSSProperties;
 
@@ -160,6 +161,12 @@ export function Character({ state, actionNonce }: CharacterProps) {
   const emo = EMOTION_SPEC[state.emotion];
   const rig = POSE_RIG[state.pose];
   const erg = EMO_RIG[state.emotion];
+  /**
+   * 场景光照契约（见 scenes/spec.ts）。
+   * 颜色与轮廓光强度走 CSS 变量（--key-color / --fill-color / --rim-strength），
+   * 这里只取渐变**几何**：SVG 的 offset / x2 / y2 是属性，不接受 var()。
+   */
+  const lighting = specOf(state.scene).lighting;
 
   const primary = state.pendingActions[0];
   const lip = useMouthPhase(state.subtitle, state.characterStatus === "speaking");
@@ -277,9 +284,24 @@ export function Character({ state, actionNonce }: CharacterProps) {
                     <stop offset="1" stopColor="#5f3311" />
                   </linearGradient>
                   <linearGradient id="mx-rim" x1="1" y1="0" x2="0" y2="0.6">
-                    <stop offset="0" stopColor="#9ec6ec" stopOpacity="0.85" />
-                    <stop offset="0.5" stopColor="#9ec6ec" stopOpacity="0.12" />
-                    <stop offset="1" stopColor="#9ec6ec" stopOpacity="0" />
+                    <stop
+                      offset="0"
+                      style={{
+                        stopColor: "var(--fill-color, #9ec6ec)",
+                        stopOpacity: "calc(var(--rim-strength, 1) * 0.85)",
+                      }}
+                    />
+                    <stop
+                      offset="0.5"
+                      style={{
+                        stopColor: "var(--fill-color, #9ec6ec)",
+                        stopOpacity: "calc(var(--rim-strength, 1) * 0.12)",
+                      }}
+                    />
+                    <stop
+                      offset="1"
+                      style={{ stopColor: "var(--fill-color, #9ec6ec)", stopOpacity: "0" }}
+                    />
                   </linearGradient>
                   <radialGradient id="mx-iris" cx="0.42" cy="0.36" r="0.75">
                     <stop offset="0" stopColor="#8a6038" />
@@ -294,13 +316,31 @@ export function Character({ state, actionNonce }: CharacterProps) {
                     <stop offset="0" stopColor="#bfe3ff" stopOpacity="0.85" />
                     <stop offset="1" stopColor="#bfe3ff" stopOpacity="0" />
                   </radialGradient>
-                  <linearGradient id="mx-shade" x1="0" y1="0" x2="1" y2="0.2">
+                  <linearGradient
+                    id="mx-shade"
+                    x1="0"
+                    y1="0"
+                    x2={String(lighting.keyDir.x)}
+                    y2={String(lighting.keyDir.y)}
+                  >
                     <stop offset="0" stopColor="#050a14" stopOpacity="0.85" />
-                    <stop offset="0.62" stopColor="#050a14" stopOpacity="0" />
+                    <stop
+                      offset={String(lighting.shadowSoftness)}
+                      stopColor="#050a14"
+                      stopOpacity="0"
+                    />
                   </linearGradient>
                   <radialGradient id="mx-muglight" cx="0.5" cy="0.2" r="0.7">
-                    <stop offset="0" stopColor="#ffe6bd" stopOpacity="0.55" />
-                    <stop offset="1" stopColor="#ffe6bd" stopOpacity="0" />
+                    <stop
+                      offset="0"
+                      style={{ stopColor: "var(--key-color, #ffe6bd)" }}
+                      stopOpacity="0.55"
+                    />
+                    <stop
+                      offset="1"
+                      style={{ stopColor: "var(--key-color, #ffe6bd)" }}
+                      stopOpacity="0"
+                    />
                   </radialGradient>
                   <clipPath id="mx-face-clip">
                     <path d="M200,102 C247,102 275,138 276,190 C277,214 273,232 265,250 C254,272 236,286 219,293 C213,295 206,297 200,297 C194,297 187,295 181,293 C164,286 146,272 135,250 C127,232 123,214 124,190 C125,138 153,102 200,102 Z" />

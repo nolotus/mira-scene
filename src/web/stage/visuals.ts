@@ -56,6 +56,8 @@ export const SCENE_LABEL: Record<SceneVariant, string> = {
   cafe_night: "雨夜咖啡馆",
   cafe_closing: "打烊中",
   window_rain: "窗前落雨",
+  // 示例场景：数据里有、UI 不暴露（见 scenes/spec.ts 的 seaside_dawn）
+  seaside_dawn: "海边破晓（示例）",
 };
 
 export const ACTION_LABEL: Record<Action, string> = {
