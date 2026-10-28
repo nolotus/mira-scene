@@ -122,7 +122,7 @@ type Directive =
 - **`hair_tuck` 是几何近似**：手臂用透视缩短 + 位移模拟，手没有真正碰到发夹。
 - **雨势强度用透明度与速度表达**，没有动态增减雨丝数量。
 - **语音识别依赖浏览器**：`webkitSpeechRecognition` 仅 Chrome/Edge，且它走厂商云端识别，某些网络下会报 `network` 错误——此时打字入口仍可用。
-- **部署的 Caddy 段是手工追加的**：`mira.nolo.chat` 的站点块写在 alpha 的 `/etc/caddy/Caddyfile` 末尾，而该文件由 `scripts/release/configureCaddyProxy.sh` 生成，**重跑部署脚本会覆盖它**，需要重新追加（文件里已写警示注释）。
+- **演示站的反向代理配置是手工加的**：它没走自动化发布流程，所以每次重新部署都要重新追加入口配置，否则站点会 502。
 
 ## 投入时间
 
