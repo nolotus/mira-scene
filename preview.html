@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Mira Stage · 渲染层预览</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #05070b;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- 仅开发期入口：bunx vite --port 5199 后访问 /preview.html
+         （生产构建只走 index.html，不会包含这个文件） -->
+    <div id="root"></div>
+    <script type="module" src="/src/web/stage/preview.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,1770 @@
+/* =============================================================================
+   Mira · 舞台渲染层
+   -----------------------------------------------------------------------------
+   只做 transform / opacity / filter 动画（滤镜只用在静态层上，不在每帧重算布局）。
+   层级：
+     .stage-camera  ── 镜头（push_in / pull_back / whip_pan / shake / settle）
+       .scene       ── 4 层景深
+         .sc-room      室内墙面 / 吧台 / 吊灯        （最远，轻微失焦）
+         .sc-window    窗 + 窗外雨街 + 玻璃水珠       （中景）
+         .sc-warm      暖光池 / 桌面 / 咖啡热气       （角色身后）
+       .char        ── 角色（SVG 分层）
+       .stage-beat  ── 由对话触发的视觉事件
+       .sc-fg       ── 前景雨幕 / 水汽 / 暗角 / 闪电
+   ========================================================================== */
+
+.stage-root {
+  --ink: #f2eee9;
+  --amber: #f2b45c;
+  --amber-hot: #ffd8a0;
+  --cool: #9ec6ec;
+  --night: #060a11;
+
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 100dvh;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  background:
+    radial-gradient(120% 70% at 50% -10%, #16222f 0%, #0a1017 42%, #05080d 100%);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ------------------------------------------------------------------ 画布
+
+   移动端：满屏竖屏（视觉主体就是场景本身）
+   桌面端：居中的竖向画布列，左右留出影院式黑边，不横向铺满
+*/
+
+.stage-canvas {
+  position: relative;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  isolation: isolate;
+  background: var(--night);
+  container-type: size;
+  touch-action: manipulation;
+}
+
+@media (min-width: 700px) and (min-height: 600px) {
+  .stage-canvas {
+    width: auto;
+    height: min(92dvh, 900px);
+    aspect-ratio: 9 / 16;
+    max-width: min(94vw, 506px);
+    border-radius: 28px;
+    box-shadow:
+      0 70px 140px -50px rgba(0, 0, 0, 0.95),
+      0 0 0 1px rgba(255, 255, 255, 0.07),
+      inset 0 0 0 1px rgba(255, 226, 186, 0.05);
+  }
+  .stage-canvas::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 0 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(255, 214, 160, 0.25), transparent);
+  }
+}
+
+/* ------------------------------------------------------------------ 镜头 */
+
+.stage-camera {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 40%;
+  will-change: transform;
+}
+
+/* 同一镜头连续触发时，靠 data-par 在两条同名动画间切换来「重播」，
+   而不是重挂 DOM —— 重挂会让雨幕跳帧。 */
+.stage-camera[data-cam="push_in"][data-par="0"] { animation: camPushA 1500ms cubic-bezier(0.16, 0.72, 0.24, 1); }
+.stage-camera[data-cam="push_in"][data-par="1"] { animation: camPushB 1500ms cubic-bezier(0.16, 0.72, 0.24, 1); }
+.stage-camera[data-cam="pull_back"][data-par="0"] { animation: camPullA 1600ms cubic-bezier(0.2, 0.7, 0.25, 1); }
+.stage-camera[data-cam="pull_back"][data-par="1"] { animation: camPullB 1600ms cubic-bezier(0.2, 0.7, 0.25, 1); }
+.stage-camera[data-cam="whip_pan"][data-par="0"] { animation: camWhipA 760ms cubic-bezier(0.12, 0.86, 0.16, 1); }
+.stage-camera[data-cam="whip_pan"][data-par="1"] { animation: camWhipB 760ms cubic-bezier(0.12, 0.86, 0.16, 1); }
+.stage-camera[data-cam="shake"][data-par="0"] { animation: camShakeA 620ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+.stage-camera[data-cam="shake"][data-par="1"] { animation: camShakeB 620ms cubic-bezier(0.36, 0.07, 0.19, 0.97); }
+.stage-camera[data-cam="settle"][data-par="0"] { animation: camSettleA 1300ms cubic-bezier(0.16, 1.1, 0.26, 1); }
+.stage-camera[data-cam="settle"][data-par="1"] { animation: camSettleB 1300ms cubic-bezier(0.16, 1.1, 0.26, 1); }
+
+@keyframes camPushA { 0% { transform: none; } 58% { transform: scale(1.092) translate3d(0, -1.1%, 0); } 100% { transform: scale(1.014); } }
+@keyframes camPushB { 0% { transform: none; } 58% { transform: scale(1.092) translate3d(0, -1.1%, 0); } 100% { transform: scale(1.014); } }
+@keyframes camPullA { 0% { transform: none; } 46% { transform: scale(0.962) translate3d(0, 0.8%, 0); } 100% { transform: scale(0.995); } }
+@keyframes camPullB { 0% { transform: none; } 46% { transform: scale(0.962) translate3d(0, 0.8%, 0); } 100% { transform: scale(0.995); } }
+@keyframes camWhipA {
+  0% { transform: translate3d(-11%, 0, 0) skewX(2deg) scale(1.03); filter: blur(2.4px); }
+  62% { transform: translate3d(1.6%, 0, 0) skewX(-0.4deg) scale(1.01); filter: blur(0.4px); }
+  100% { transform: none; filter: blur(0); }
+}
+@keyframes camWhipB {
+  0% { transform: translate3d(-11%, 0, 0) skewX(2deg) scale(1.03); filter: blur(2.4px); }
+  62% { transform: translate3d(1.6%, 0, 0) skewX(-0.4deg) scale(1.01); filter: blur(0.4px); }
+  100% { transform: none; filter: blur(0); }
+}
+@keyframes camShakeA {
+  0%, 100% { transform: none; }
+  12% { transform: translate3d(-1.8%, 1.1%, 0) rotate(-0.5deg); }
+  26% { transform: translate3d(1.6%, -1.4%, 0) rotate(0.45deg); }
+  40% { transform: translate3d(-1.3%, 0.7%, 0) rotate(-0.3deg); }
+  56% { transform: translate3d(1%, -0.6%, 0) rotate(0.22deg); }
+  74% { transform: translate3d(-0.5%, 0.3%, 0) rotate(-0.1deg); }
+}
+@keyframes camShakeB {
+  0%, 100% { transform: none; }
+  12% { transform: translate3d(-1.8%, 1.1%, 0) rotate(-0.5deg); }
+  26% { transform: translate3d(1.6%, -1.4%, 0) rotate(0.45deg); }
+  40% { transform: translate3d(-1.3%, 0.7%, 0) rotate(-0.3deg); }
+  56% { transform: translate3d(1%, -0.6%, 0) rotate(0.22deg); }
+  74% { transform: translate3d(-0.5%, 0.3%, 0) rotate(-0.1deg); }
+}
+@keyframes camSettleA {
+  0% { transform: scale(1.035) translate3d(0, 1.4%, 0); }
+  62% { transform: scale(0.994) translate3d(0, -0.3%, 0); }
+  100% { transform: none; }
+}
+@keyframes camSettleB {
+  0% { transform: scale(1.035) translate3d(0, 1.4%, 0); }
+  62% { transform: scale(0.994) translate3d(0, -0.3%, 0); }
+  100% { transform: none; }
+}
+
+/* ------------------------------------------------------------------ 场景 */
+
+.scene {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #080c14;
+  filter: brightness(calc(1 - var(--vfx-lights-dim, 0) * 0.55))
+    saturate(calc(1 - var(--vfx-lights-dim, 0) * 0.2));
+  transition: filter 1100ms ease;
+}
+
+/* --- 第 1 层：室内 ------------------------------------------------------- */
+
+.sc-room {
+  position: absolute;
+  inset: 0;
+  filter: blur(1.6px) brightness(0.98);
+  transition: filter 1000ms ease, opacity 1200ms ease;
+}
+
+.wall {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(96% 62% at 74% 20%, #4a2f1b 0%, #29190f 42%, #120b07 78%, #0a0605 100%);
+}
+
+.wall::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    92deg,
+    rgba(0, 0, 0, 0.26) 0 2px,
+    rgba(255, 210, 160, 0.03) 2px 3px,
+    transparent 3px 46px
+  );
+  opacity: 0.7;
+}
+
+.wall-warm {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(38% 30% at 72% 24%, rgba(255, 194, 118, 0.4), transparent 72%);
+  mix-blend-mode: screen;
+  opacity: calc(0.62 + var(--vfx-warm-glow, 0) * 0.5);
+  transition: opacity 1200ms ease;
+}
+
+.floor {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 30%;
+  background: linear-gradient(180deg, rgba(28, 16, 10, 0.9) 0%, #0b0605 78%);
+}
+
+.floor::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255, 176, 104, 0.22), transparent 56%);
+  opacity: 0.7;
+}
+
+.counter {
+  position: absolute;
+  right: -8%;
+  bottom: 15%;
+  width: 74%;
+  height: 13%;
+  border-radius: 4px 0 0 4px;
+  background: linear-gradient(180deg, #452a17 0%, #24150c 60%, #140b06 100%);
+  box-shadow:
+    0 -1px 0 rgba(255, 214, 166, 0.22),
+    0 24px 50px -20px rgba(0, 0, 0, 0.8);
+  transition: opacity 1200ms ease;
+}
+
+.counter::after {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 34%;
+  background: linear-gradient(90deg, rgba(255, 200, 140, 0.16), transparent 70%);
+}
+
+.shelf {
+  position: absolute;
+  top: 17%;
+  right: 5%;
+  width: 33%;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(0, 0, 0, 0.55);
+  box-shadow:
+    0 24px 0 rgba(0, 0, 0, 0.48),
+    0 48px 0 rgba(0, 0, 0, 0.42),
+    0 0 0 0.5px rgba(255, 210, 160, 0.1);
+}
+
+.chairs {
+  position: absolute;
+  bottom: 11%;
+  left: 3%;
+  width: 44%;
+  height: 21%;
+  opacity: 0.92;
+}
+
+.chair {
+  position: absolute;
+  bottom: 0;
+  width: 25%;
+  height: 100%;
+  border-radius: 10px 10px 2px 2px;
+  background: linear-gradient(180deg, #33200f 0%, #1a0f08 70%, #100a06 100%);
+  box-shadow: inset 0 2px 0 rgba(255, 205, 150, 0.14);
+  transform-origin: 50% 100%;
+  transition: transform 1100ms cubic-bezier(0.2, 0.8, 0.25, 1);
+}
+
+.chair:nth-child(1) { left: 0; height: 92%; }
+.chair:nth-child(2) { left: 34%; height: 100%; }
+.chair:nth-child(3) { left: 68%; height: 86%; }
+
+.hang-lamp {
+  position: absolute;
+  top: 0;
+  right: 21%;
+  width: 120px;
+  height: 42%;
+}
+
+.cord {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 2px;
+  height: 15%;
+  background: #120b06;
+  translate: -50% 0;
+}
+
+.shade {
+  position: absolute;
+  top: 14%;
+  left: 50%;
+  width: 66px;
+  height: 26px;
+  translate: -50% 0;
+  border-radius: 50% 50% 14% 14% / 84% 84% 18% 18%;
+  background: linear-gradient(180deg, #8a5423 0%, #d08b3c 62%, #7d4517 100%);
+  box-shadow: 0 0 26px rgba(255, 190, 116, 0.55), inset 0 -6px 10px rgba(255, 206, 140, 0.55);
+  transition: filter 1000ms ease;
+}
+
+.cone {
+  position: absolute;
+  top: 21%;
+  left: 50%;
+  width: 250px;
+  height: 76%;
+  translate: -50% 0;
+  background: radial-gradient(
+    58% 96% at 50% 0%,
+    rgba(255, 199, 128, 0.36),
+    rgba(255, 176, 100, 0.1) 42%,
+    transparent 74%
+  );
+  clip-path: polygon(34% 0, 66% 0, 100% 100%, 0 100%);
+  mix-blend-mode: screen;
+  opacity: calc(0.8 + var(--vfx-warm-glow, 0) * 0.4);
+  transition: opacity 1000ms ease;
+}
+
+/* --- 第 2 层：窗与雨街 --------------------------------------------------- */
+
+.sc-window {
+  position: absolute;
+  top: 4%;
+  left: -9%;
+  width: 67%;
+  height: 73%;
+  overflow: hidden;
+  border-radius: 8px;
+  transform-origin: 30% 30%;
+  filter: blur(0.7px) saturate(1.05);
+  box-shadow: 0 34px 80px -24px rgba(0, 0, 0, 0.85);
+  transition: transform 1500ms cubic-bezier(0.2, 0.72, 0.24, 1), filter 1200ms ease;
+}
+
+.street {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, #08111d 0%, #0f2136 42%, #17324c 100%);
+}
+
+.sky {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(78% 54% at 22% 8%, rgba(132, 178, 226, 0.42), transparent 66%),
+    radial-gradient(50% 40% at 76% 22%, rgba(92, 128, 176, 0.28), transparent 70%);
+}
+
+.bldg {
+  position: absolute;
+  bottom: 0;
+  background: #070e18;
+}
+
+.bldg::after {
+  content: "";
+  position: absolute;
+  inset: 8% 6%;
+  background-image: radial-gradient(circle, rgba(255, 208, 150, 0.75) 1.1px, transparent 1.5px);
+  background-size: 9px 12px;
+  opacity: 0.32;
+}
+
+.bldg.b1 { left: -2%; width: 30%; height: 42%; }
+.bldg.b2 { left: 24%; width: 26%; height: 56%; }
+.bldg.b3 { left: 52%; width: 34%; height: 38%; }
+
+.lamp-post {
+  position: absolute;
+  bottom: 14%;
+  left: 17%;
+  width: 2.5px;
+  height: 46%;
+  background: #05090f;
+}
+
+.lamp-post::after {
+  content: "";
+  position: absolute;
+  top: -7px;
+  left: 50%;
+  width: 11px;
+  height: 11px;
+  translate: -50% 0;
+  border-radius: 50%;
+  background: #ffe0b0;
+  box-shadow: 0 0 16px 5px rgba(255, 200, 140, 0.45);
+}
+
+.lamp-halo {
+  position: absolute;
+  bottom: 26%;
+  left: 17%;
+  width: 42%;
+  aspect-ratio: 1;
+  translate: -19% 26%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 202, 142, 0.3), transparent 62%);
+  mix-blend-mode: screen;
+}
+
+.glass-tint {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      122deg,
+      rgba(178, 214, 246, 0.22) 0 19%,
+      transparent 19.6% 37%,
+      rgba(178, 214, 246, 0.12) 37.4% 46%,
+      transparent 46.4%
+    ),
+    radial-gradient(120% 90% at 84% 104%, rgba(8, 16, 28, 0.6), transparent 62%);
+  mix-blend-mode: screen;
+}
+
+.glass-drops i {
+  position: absolute;
+  border-radius: 50% 50% 56% 56%;
+  background: radial-gradient(
+    circle at 34% 28%,
+    rgba(232, 246, 255, 0.9),
+    rgba(158, 200, 238, 0.28) 62%,
+    transparent 78%
+  );
+  box-shadow: 0 0 6px rgba(180, 215, 255, 0.35);
+  animation: dropletSlide 10s linear infinite;
+}
+
+.frame {
+  position: absolute;
+  inset: 0;
+  border: 9px solid #170f09;
+  border-radius: 6px;
+  box-shadow:
+    inset 0 0 34px rgba(0, 0, 0, 0.72),
+    inset 0 0 0 1px rgba(255, 214, 165, 0.08);
+  pointer-events: none;
+}
+
+.mullion {
+  position: absolute;
+  background: #150e08;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.7);
+}
+
+.mullion.mv1 { top: 0; bottom: 0; left: 41%; width: 6px; }
+.mullion.mv2 { top: 0; bottom: 0; left: 73%; width: 5px; }
+.mullion.mh1 { top: 55%; right: 0; left: 0; height: 6px; }
+
+/* --- 第 3 层：暖光池 / 桌面 / 热气 --------------------------------------- */
+
+.sc-warm {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.warm-pool {
+  position: absolute;
+  top: 44%;
+  left: 50%;
+  width: 124%;
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(255, 190, 118, 0.36) 0%,
+    rgba(255, 146, 66, 0.16) 34%,
+    transparent 66%
+  );
+  mix-blend-mode: screen;
+  filter: blur(6px);
+  opacity: calc(var(--warmth, 0.6) * (0.5 + var(--vfx-warm-glow, 0) * 0.8));
+  transition: opacity 1400ms ease;
+}
+
+.table {
+  position: absolute;
+  bottom: 1%;
+  left: -18%;
+  width: 64%;
+  height: 23%;
+}
+
+.table-top {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 15%;
+  border-radius: 50% / 46%;
+  background: linear-gradient(180deg, #6b3f22 0%, #341d11 100%);
+  box-shadow:
+    0 -1px 0 rgba(255, 210, 160, 0.3),
+    0 14px 30px -8px rgba(0, 0, 0, 0.75);
+}
+
+.table-leg {
+  position: absolute;
+  top: 12%;
+  left: 46%;
+  width: 6%;
+  height: 86%;
+  background: linear-gradient(180deg, #3a2113, #180d07);
+}
+
+.table-cup {
+  position: absolute;
+  top: -14%;
+  left: 58%;
+  width: 12%;
+  height: 16%;
+  border-radius: 12% 12% 26% 26%;
+  background: linear-gradient(180deg, #f6f0e4, #cbbda7);
+  box-shadow: inset -3px 0 4px rgba(0, 0, 0, 0.15), 0 0 18px rgba(255, 205, 145, 0.35);
+}
+
+.steam {
+  position: absolute;
+  bottom: 20%;
+  left: 24%;
+  width: 70px;
+  height: 92px;
+  opacity: calc(0.1 + var(--vfx-steam-wisp, 0) * 0.9);
+  transition: opacity 1200ms ease;
+}
+
+.steam i {
+  position: absolute;
+  bottom: 0;
+  width: 13px;
+  height: 72px;
+  border-radius: 50%;
+  background: linear-gradient(0deg, rgba(255, 236, 208, 0.55), transparent);
+  filter: blur(4px);
+  animation: steamRise 7s ease-in-out infinite;
+}
+
+.steam i:nth-child(2) { left: 22px; animation-delay: 1.6s; height: 88px; }
+.steam i:nth-child(3) { left: 44px; animation-delay: 3.2s; height: 64px; }
+
+/* --- 第 4 层：前景雨幕 / 水汽 / 暗角 / 闪电 ------------------------------- */
+
+.sc-fg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.rain-layer {
+  position: absolute;
+  inset: -16% -14%;
+  overflow: hidden;
+  transform: rotate(-7deg);
+}
+
+.rain-far {
+  opacity: calc(0.62 + var(--vfx-rain-heavy, 0) * 0.5 - var(--vfx-rain-light, 0) * 0.22);
+  transition: opacity 900ms ease;
+}
+
+.rain-near {
+  opacity: 0.3;
+  filter: blur(1.2px);
+}
+
+.rain-sheet {
+  position: absolute;
+  top: -50%;
+  right: 0;
+  left: 0;
+  height: 200%;
+  animation: sheetFall var(--rain-dur, 1.2s) linear infinite;
+  transition: opacity 900ms ease;
+}
+
+.rain-far .rain-sheet { --rain-dur: calc(1.34s - var(--vfx-rain-heavy, 0) * 0.5s + var(--vfx-rain-light, 0) * 0.5s); }
+.rain-near .rain-sheet { --rain-dur: 0.78s; }
+
+.rain-block {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 50%;
+}
+
+.rain-block.b { top: 50%; }
+
+.streak {
+  position: absolute;
+  top: -12%;
+  display: block;
+  border-radius: 1px;
+  background: linear-gradient(
+    180deg,
+    rgba(200, 228, 255, 0) 0%,
+    rgba(205, 230, 255, 0.62) 46%,
+    rgba(238, 249, 255, 0.9) 100%
+  );
+  transform: skewX(var(--skew, 0deg));
+}
+
+.haze {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(180deg, rgba(124, 164, 204, 0.12) 0%, transparent 26%),
+    radial-gradient(58% 38% at 50% 90%, rgba(255, 186, 118, 0.14), transparent 72%);
+}
+
+.vignette {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    116% 76% at 50% 36%,
+    transparent 36%,
+    rgba(3, 6, 11, 0.5) 74%,
+    rgba(3, 6, 11, 0.9) 100%
+  );
+}
+
+.lightning {
+  position: absolute;
+  inset: 0;
+  opacity: calc(var(--vfx-lightning, 0) * 0.95);
+  mix-blend-mode: screen;
+  transition: opacity 240ms ease-out;
+}
+
+.lightning span {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    124% 92% at 28% 6%,
+    rgba(222, 240, 255, 0.95),
+    rgba(158, 200, 250, 0.5) 38%,
+    transparent 72%
+  );
+  animation: flashFlicker 1000ms steps(1, end) infinite;
+}
+
+/* ------------------------------------------------------------------ 场景变体 */
+
+/* 打烊中：灯变暗、椅子翻到桌上、窗外更冷 */
+.stage-root[data-scene="cafe_closing"] .wall {
+  background: radial-gradient(96% 62% at 74% 20%, #24150c 0%, #150c07 44%, #0a0605 82%);
+}
+
+.stage-root[data-scene="cafe_closing"] .wall-warm { opacity: 0.3; }
+.stage-root[data-scene="cafe_closing"] .cone { opacity: 0.22; }
+.stage-root[data-scene="cafe_closing"] .shade { filter: brightness(0.55) saturate(0.7); }
+.stage-root[data-scene="cafe_closing"] .counter { opacity: 0.75; }
+.stage-root[data-scene="cafe_closing"] .chair:nth-child(1) { transform: rotate(-84deg) translateY(30%); }
+.stage-root[data-scene="cafe_closing"] .chair:nth-child(2) { transform: rotate(-88deg) translateY(24%); }
+.stage-root[data-scene="cafe_closing"] .chair:nth-child(3) { transform: rotate(-80deg) translateY(34%); }
+.stage-root[data-scene="cafe_closing"] .warm-pool { opacity: calc(var(--warmth, 0.6) * 0.34); }
+.stage-root[data-scene="cafe_closing"] .sc-window { filter: blur(0.7px) saturate(1.15) brightness(1.12); }
+.stage-root[data-scene="cafe_closing"] .street {
+  background: linear-gradient(180deg, #050c16 0%, #0a1828 42%, #102840 100%);
+}
+
+/* 窗前落雨：镜头贴近玻璃，室内退到景深之外 */
+.stage-root[data-scene="window_rain"] .sc-window { transform: scale(1.9); filter: blur(0.4px) saturate(1.1); }
+.stage-root[data-scene="window_rain"] .sc-room { opacity: 0.34; filter: blur(4px) brightness(0.72); }
+.stage-root[data-scene="window_rain"] .counter { opacity: 0.4; }
+.stage-root[data-scene="window_rain"] .warm-pool { opacity: calc(var(--warmth, 0.6) * 0.26); }
+.stage-root[data-scene="window_rain"] .mullion.mh1 { opacity: 0.45; }
+.stage-root[data-scene="window_rain"] .rain-far { opacity: calc(0.6 + var(--vfx-rain-heavy, 0) * 0.4); }
+
+/* ------------------------------------------------------------------ 角色
+
+   骨架分层（每层独立 transform 原点，互不覆盖）：
+     .char-rig        ── 站位：整体位移/缩放（只负责「人在哪」，不负责表演）
+     .char-yaw        ── 侧身：绕 Y 轴旋转 + 透视（躯干真的转过去）
+     .char-act        ── 一次性动作根（key 变化即重播，整棵子树重挂）
+     .char-torso      ── 躯干微转（原点在腰）
+     .char-shoulders  ── 肩线：压肩 / 耸肩（原点在肩带着力点）
+     .char-neck       ── 颈：前伸
+     .char-head       ── 头（原点在颈根）：旋转 + 反向补偿侧身
+     .char-head-act   ── 头部的动作层（点头/抖动），不碰上面的过渡
+     .char-hem        ── 下摆（原点在肩）：延迟于呼吸的 2–4px 摆动
+     .char-arm-l/r    ── 上臂（原点在肩关节）
+     .char-reach      ── 别头发时抬起的手臂（前景）
+*/
+
+.char {
+  position: absolute;
+  bottom: 30%;
+  left: 50%;
+  height: 56%;
+  aspect-ratio: 400 / 560;
+  translate: -50% 0;
+  will-change: transform;
+}
+
+.char-breathe {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 92%;
+  animation: breathe var(--breath-dur, 4.6s) ease-in-out infinite;
+}
+
+.char-rig {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 88%;
+  perspective: 780px;
+  transform: translate3d(var(--char-x, 0px), var(--char-y, 0px), 0)
+    rotate(var(--char-rot, 0deg)) scale(var(--char-scale, 1));
+  transition: transform 950ms cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+
+.char-yaw {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 60%;
+  transform: rotateY(var(--rig-turn, 0deg));
+  transition: transform 1000ms cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+
+.char-act {
+  position: absolute;
+  inset: 0;
+  transform-origin: 50% 82%;
+}
+
+.char-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* ---- 骨架各层 -------------------------------------------------------- */
+
+.char-torso {
+  transform-box: view-box;
+  transform-origin: 200px 500px;
+  transform: rotate(var(--torso-rot, 0deg));
+  transition: transform 1000ms cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+
+.char-shoulders {
+  transform-box: view-box;
+  transform-origin: 200px 352px;
+  transform: translateY(var(--shoulder-drop, 0px)) scaleX(var(--shoulder-wide, 1));
+  transition: transform 900ms cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+
+.char-neck {
+  transform-box: view-box;
+  transform-origin: 200px 322px;
+  transform: translate(var(--neck-fwd, 0px), calc(var(--neck-fwd, 0px) * 0.5))
+    rotate(calc(var(--neck-fwd, 0px) * -0.07));
+  transition: transform 900ms cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+
+.char-head {
+  transform-box: view-box;
+  transform-origin: 200px 312px;
+  transform: rotate(var(--head-rot, 0deg)) translate(var(--head-x, 0px), var(--head-y, 0px))
+    scaleX(var(--head-unyaw, 1)) skewX(var(--head-unskew, 0deg));
+  transition: transform 980ms cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+
+/* 头部动作层：点头、抖动、别头发时的偏头都只动这一层 */
+.char-head-act {
+  transform-box: view-box;
+  transform-origin: 200px 312px;
+}
+
+.char-hem {
+  transform-box: view-box;
+  transform-origin: 200px 340px;
+  animation: hemSway var(--hem-dur, 4.6s) ease-in-out infinite;
+  animation-delay: var(--hem-delay, 0s);
+}
+
+.char-sidehair {
+  transform-box: view-box;
+  transform-origin: 200px 340px;
+  animation: hemSway var(--hem-dur, 4.6s) ease-in-out infinite;
+  animation-delay: var(--hem-delay, 0s);
+  animation-direction: alternate;
+}
+
+.char-arm {
+  transform-box: view-box;
+  transition: transform 900ms cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+
+.char-arm-l {
+  transform-origin: 146px 350px;
+  transform: rotate(var(--arm-l, 0deg));
+}
+
+.char-arm-r {
+  transform-origin: 254px 350px;
+  transform: rotate(var(--arm-r, 0deg));
+}
+
+/* 别头发：抬起的手臂，靠透视缩短表现「伸过去」——不做整体平移 */
+.char-reach {
+  transform-box: view-box;
+  transform-origin: 152px 352px;
+  opacity: 0;
+  transition: opacity 180ms linear;
+}
+
+/* ---- 面部基础件 ------------------------------------------------------ */
+
+.face-shade {
+  opacity: var(--shade, 0.16);
+  transition: opacity 900ms ease;
+}
+
+.cheek {
+  opacity: var(--cheek, 0.14);
+  transition: opacity 700ms ease;
+}
+
+.hairpin {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+}
+
+.pin-act {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+}
+
+.pin-spark {
+  animation: sparkle 5.2s ease-in-out infinite;
+}
+
+.strand {
+  transform-box: fill-box;
+  transform-origin: 30% 90%;
+}
+
+.coat-drop {
+  animation: dropTwinkle 7s ease-in-out infinite;
+}
+
+/* ---- 眼睛：情绪换开口（裁剪）、瞳孔大小、眨眼重播 ---------------------- */
+
+.eye-set {
+  opacity: 0;
+  transition: opacity 260ms ease;
+}
+
+.char-rig[data-emotion="neutral"] .eye-set-neutral { opacity: 1; }
+.char-rig[data-emotion="curious"] .eye-set-curious { opacity: 1; }
+.char-rig[data-emotion="warm"] .eye-set-warm { opacity: 1; }
+.char-rig[data-emotion="amused"] .eye-set-amused { opacity: 1; }
+.char-rig[data-emotion="anxious"] .eye-set-anxious { opacity: 1; }
+.char-rig[data-emotion="sad"] .eye-set-sad { opacity: 1; }
+.char-rig[data-emotion="surprised"] .eye-set-surprised { opacity: 1; }
+
+/* 眼睛开合（情绪）→ 眨眼（随机重播）分两层，互不覆盖 */
+.eye-shape {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+  transform: scaleY(var(--eye-open, 1));
+  transition: transform 520ms cubic-bezier(0.3, 0.8, 0.3, 1);
+}
+
+.eye-blink {
+  transform-box: fill-box;
+  transform-origin: 50% 22%;
+  animation-name: var(--blink-name, blinkOnceA);
+  animation-duration: var(--blink-ms, 300ms);
+  animation-timing-function: cubic-bezier(0.36, 0.1, 0.24, 1);
+  animation-fill-mode: both;
+}
+
+.eye:nth-of-type(2) .eye-blink {
+  animation-delay: 44ms;
+}
+
+.gaze {
+  transition: transform 720ms cubic-bezier(0.3, 0.8, 0.3, 1);
+  transform: translate(var(--gaze-x, 0px), var(--gaze-y, 0px));
+}
+
+/* 动作期间的视线微动（叠在 --gaze 之上，不打断它的过渡） */
+.gaze-act {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+}
+
+/* ---- 眉 / 嘴 / 下颌 -------------------------------------------------- */
+
+.brow {
+  opacity: 0;
+  transition: opacity 340ms ease;
+}
+
+.brow path {
+  fill: none;
+  stroke: #4a2f20;
+  stroke-width: 3.3;
+  stroke-linecap: round;
+}
+
+.mouth {
+  opacity: 0;
+  transition: opacity 280ms ease;
+}
+
+.mouth path {
+  stroke: #96524a;
+  stroke-width: 2.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.lip {
+  opacity: 0;
+  transition: opacity 70ms linear;
+}
+
+.char-jaw {
+  transform-box: view-box;
+  transform-origin: 200px 248px;
+  transition: transform 90ms linear;
+}
+
+.char-rig[data-emotion="neutral"] .brow-neutral { opacity: 0.92; }
+.char-rig[data-emotion="neutral"] .mouth-neutral { opacity: 1; }
+.char-rig[data-emotion="curious"] .brow-curious { opacity: 0.92; }
+.char-rig[data-emotion="curious"] .mouth-curious { opacity: 1; }
+.char-rig[data-emotion="warm"] .brow-warm { opacity: 0.9; }
+.char-rig[data-emotion="warm"] .mouth-warm { opacity: 1; }
+.char-rig[data-emotion="amused"] .brow-amused { opacity: 0.92; }
+.char-rig[data-emotion="amused"] .mouth-amused { opacity: 1; }
+.char-rig[data-emotion="anxious"] .brow-anxious { opacity: 0.95; }
+.char-rig[data-emotion="anxious"] .mouth-anxious { opacity: 1; }
+.char-rig[data-emotion="sad"] .brow-sad { opacity: 0.95; }
+.char-rig[data-emotion="sad"] .mouth-sad { opacity: 1; }
+.char-rig[data-emotion="surprised"] .brow-surprised { opacity: 0.95; }
+.char-rig[data-emotion="surprised"] .mouth-surprised { opacity: 1; }
+
+/* 情绪标记：焦虑滴汗、惊讶爆点（静态单帧就能认出来） */
+.mark {
+  opacity: 0;
+  transition: opacity 320ms ease;
+}
+
+.char-rig[data-emotion="anxious"] .mark-sweat {
+  opacity: 0.85;
+  animation: sweatDrop 3.6s ease-in-out infinite;
+}
+
+.char-rig[data-emotion="surprised"] .mark-spark {
+  opacity: 0.95;
+  animation: sparkBurst 1.6s ease-in-out infinite;
+}
+
+/* ---- 说话：口型 4 相位（0 闭合复用情绪嘴形） ------------------------- */
+
+.char-rig[data-lip="1"] .lip-1 { opacity: 1; }
+.char-rig[data-lip="2"] .lip-2 { opacity: 1; }
+.char-rig[data-lip="3"] .lip-3 { opacity: 1; }
+
+.char-rig[data-status="speaking"] .mouth { opacity: 0; }
+
+/* 下颌跟着口型开合 */
+.char-rig[data-lip="1"] .char-jaw { transform: translateY(2.6px) scaleY(1.03); }
+.char-rig[data-lip="2"] .char-jaw { transform: translateY(5px) scaleY(1.07); }
+.char-rig[data-lip="3"] .char-jaw { transform: translateY(1.8px) scaleY(1.02); }
+
+/* ---- 状态：倾听 / 思考 / 说话 ---------------------------------------- */
+
+.ear-glow {
+  opacity: var(--ear-glow, 0);
+  animation: earPulse 2.5s ease-in-out infinite;
+  transition: opacity 700ms ease;
+}
+
+.think-motes circle {
+  fill: #cfe6ff;
+  opacity: 0;
+  transition: opacity 800ms ease;
+}
+
+.char-rig[data-status="thinking"] .think-motes circle {
+  opacity: 0.75;
+  animation: mote 4.6s ease-in-out infinite;
+}
+
+.char-rig[data-status="thinking"] .think-motes circle:nth-child(2) { animation-delay: 1.1s; }
+.char-rig[data-status="thinking"] .think-motes circle:nth-child(3) { animation-delay: 2.2s; }
+
+/* 说话：轻微点头（只在没有一次性动作时接管，动作优先） */
+.char-rig[data-status="speaking"][data-act="none"] .char-head-act {
+  animation: speakBob 1.15s ease-in-out infinite;
+}
+
+/* 杯子（hold_cup） */
+.mug {
+  opacity: var(--cup, 0);
+  transition: opacity 620ms ease;
+}
+
+/* ---- 一次性动作 ------------------------------------------------------
+   每个动作 ≥3 个关键帧，500–1300ms，全部跑在子层（头/肩/臂/下颌/下摆/眼），
+   所以动作期间 .char-rig / .char-head / .char-arm 的姿态过渡不会被覆盖。
+   （选择器写在状态规则之后：说话点头让位给动作。）
+*/
+
+/* 眨眼 */
+.char-rig[data-act="blink"] .eye-blink {
+  animation: blinkAct 320ms cubic-bezier(0.36, 0.1, 0.24, 1) both;
+}
+
+/* 别头发：肩抬 → 手到发夹 → 拨动发夹 → 收回 */
+.char-rig[data-act="hair_tuck"] .char-reach {
+  animation: reachHair var(--act-dur, 1240ms) cubic-bezier(0.36, 0.7, 0.3, 1) both;
+}
+.char-rig[data-act="hair_tuck"] .char-arm-l {
+  animation: armTuck var(--act-dur, 1240ms) ease-in-out both;
+}
+.char-rig[data-act="hair_tuck"] .char-head-act {
+  animation: headTuck var(--act-dur, 1240ms) ease-in-out both;
+}
+.char-rig[data-act="hair_tuck"] .pin-act {
+  animation: pinTug var(--act-dur, 1240ms) ease-in-out both;
+}
+.char-rig[data-act="hair_tuck"] .strand {
+  animation: strandLift var(--act-dur, 1240ms) ease-in-out both;
+}
+.char-rig[data-act="hair_tuck"] .gaze-act {
+  animation: gazeTuck var(--act-dur, 1240ms) ease-in-out both;
+}
+
+/* 叹气：吸气抬胸 → 塌肩 → 低头 → 缓回，下巴跟着落一下 */
+.char-rig[data-act="sigh"] .char-shoulders {
+  animation: sighChest var(--act-dur, 1300ms) ease-in-out both;
+}
+.char-rig[data-act="sigh"] .char-head-act {
+  animation: sighHead var(--act-dur, 1300ms) ease-in-out both;
+}
+.char-rig[data-act="sigh"] .char-jaw {
+  animation: sighJaw var(--act-dur, 1300ms) ease-in-out both;
+}
+.char-rig[data-act="sigh"] .char-hem {
+  animation: sighHem var(--act-dur, 1300ms) ease-in-out both;
+}
+
+/* 冷颤：肩/头/袖/下摆同一拍抖，眼也缩一下 */
+.char-rig[data-act="shiver"] .char-shoulders {
+  animation: shiverBody var(--act-dur, 720ms) linear both;
+}
+.char-rig[data-act="shiver"] .char-head-act {
+  animation: shiverHead var(--act-dur, 720ms) linear both;
+}
+.char-rig[data-act="shiver"] .char-arm-l {
+  animation: shiverArmL var(--act-dur, 720ms) linear both;
+}
+.char-rig[data-act="shiver"] .char-arm-r {
+  animation: shiverArmR var(--act-dur, 720ms) linear both;
+}
+.char-rig[data-act="shiver"] .char-hem {
+  animation: shiverHem var(--act-dur, 720ms) linear both;
+}
+.char-rig[data-act="shiver"] .eye-shape {
+  animation: eyeSquint var(--act-dur, 720ms) ease-in-out both;
+}
+
+/* 回头看：预备反向 → 头转过去带肩 → 停一下 → 回正 */
+.char-rig[data-act="look_back"] .char-head-act {
+  animation: lookBackHead var(--act-dur, 1040ms) cubic-bezier(0.3, 0.8, 0.3, 1) both;
+}
+.char-rig[data-act="look_back"] .char-shoulders {
+  animation: lookBackBody var(--act-dur, 1040ms) ease-in-out both;
+}
+.char-rig[data-act="look_back"] .char-neck {
+  animation: lookBackNeck var(--act-dur, 1040ms) ease-in-out both;
+}
+
+/* 点头：下 → 起 → 再落一点 → 正 */
+.char-rig[data-act="nod"] .char-head-act {
+  animation: nodHead var(--act-dur, 760ms) cubic-bezier(0.3, 0.85, 0.3, 1) both;
+}
+.char-rig[data-act="nod"] .char-shoulders {
+  animation: nodBody var(--act-dur, 760ms) ease-in-out both;
+}
+
+/* 惊到：弹起 + 睁大 + 张口 + 袖口外张 */
+.char-rig[data-act="startle"] .char-head-act {
+  animation: startleHead var(--act-dur, 620ms) cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+.char-rig[data-act="startle"] .char-shoulders {
+  animation: startleBody var(--act-dur, 620ms) cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+.char-rig[data-act="startle"] .char-jaw {
+  animation: startleJaw var(--act-dur, 620ms) ease-out both;
+}
+.char-rig[data-act="startle"] .char-arm-l {
+  animation: startleArmL var(--act-dur, 620ms) ease-out both;
+}
+.char-rig[data-act="startle"] .char-arm-r {
+  animation: startleArmR var(--act-dur, 620ms) ease-out both;
+}
+.char-rig[data-act="startle"] .eye-shape {
+  animation: eyeWide var(--act-dur, 620ms) ease-out both;
+}
+.char-rig[data-act="startle"] .char-hem {
+  animation: startleHem var(--act-dur, 620ms) ease-out both;
+}
+
+/* ---- 角色关键帧 ------------------------------------------------------ */
+
+/* 下摆 / 侧发：比呼吸晚一拍（负 delay），幅度 2–4px */
+@keyframes hemSway {
+  0%, 100% { transform: rotate(calc(var(--hem-amp, 0.9deg) * -1)); }
+  50% { transform: rotate(var(--hem-amp, 0.9deg)); }
+}
+
+/* 眨眼：A/B 两套同形不同名，靠切 name 重播；Twice 是连眨两下 */
+@keyframes blinkOnceA {
+  0%, 100% { transform: scaleY(1); }
+  44% { transform: scaleY(0.05); }
+  68% { transform: scaleY(1); }
+}
+
+@keyframes blinkOnceB {
+  0%, 100% { transform: scaleY(1); }
+  44% { transform: scaleY(0.05); }
+  68% { transform: scaleY(1); }
+}
+
+@keyframes blinkTwiceA {
+  0%, 100% { transform: scaleY(1); }
+  24% { transform: scaleY(0.05); }
+  42% { transform: scaleY(1); }
+  60% { transform: scaleY(0.05); }
+  82% { transform: scaleY(1); }
+}
+
+@keyframes blinkTwiceB {
+  0%, 100% { transform: scaleY(1); }
+  24% { transform: scaleY(0.05); }
+  42% { transform: scaleY(1); }
+  60% { transform: scaleY(0.05); }
+  82% { transform: scaleY(1); }
+}
+
+@keyframes blinkAct {
+  0%, 100% { transform: scaleY(1); }
+  46% { transform: scaleY(0.04); }
+  72% { transform: scaleY(1); }
+}
+
+@keyframes reachHair {
+  0% { opacity: 0; transform: translate(6px, 46px) rotate(10deg) scale(0.6); }
+  16% { opacity: 1; transform: translate(3px, 8px) rotate(-3deg) scale(0.88); }
+  38% { opacity: 1; transform: translate(0, -42px) rotate(-8deg) scale(1); }
+  54% { opacity: 1; transform: translate(-3px, -60px) rotate(-13deg) scale(1); }
+  70% { opacity: 1; transform: translate(0, -28px) rotate(-2deg) scale(0.94); }
+  100% { opacity: 0; transform: translate(6px, 46px) rotate(10deg) scale(0.6); }
+}
+
+@keyframes armTuck {
+  0%, 100% { transform: rotate(0deg) translate(0, 0); }
+  22% { transform: rotate(7deg) translate(0, -4px); }
+  46% { transform: rotate(-9deg) translate(2px, -10px); }
+  62% { transform: rotate(-12deg) translate(2px, -11px); }
+  82% { transform: rotate(2deg) translate(0, -2px); }
+}
+
+@keyframes headTuck {
+  0%, 100% { transform: rotate(0deg) translate(0, 0); }
+  20% { transform: rotate(2.4deg) translate(1px, -2px); }
+  46% { transform: rotate(5deg) translate(-3px, 3px); }
+  62% { transform: rotate(6.2deg) translate(-4px, 4px); }
+  80% { transform: rotate(2deg) translate(-1px, 1px); }
+}
+
+@keyframes pinTug {
+  0%, 40% { transform: rotate(0deg) translate(0, 0); }
+  50% { transform: rotate(-12deg) translate(-1.5px, -2px); }
+  60% { transform: rotate(5deg) translate(1px, 1px); }
+  72% { transform: rotate(-2deg) translate(0, 0); }
+  100% { transform: rotate(0deg) translate(0, 0); }
+}
+
+@keyframes strandLift {
+  0%, 40% { transform: rotate(0deg) translate(0, 0); }
+  52% { transform: rotate(-10deg) translate(-3px, -4px); }
+  66% { transform: rotate(5deg) translate(1px, 2px); }
+  82% { transform: rotate(-1deg) translate(0, 0); }
+  100% { transform: rotate(0deg) translate(0, 0); }
+}
+
+@keyframes gazeTuck {
+  0%, 100% { transform: translate(0, 0); }
+  28% { transform: translate(-2px, -2px); }
+  50% { transform: translate(-5px, -4px); }
+  72% { transform: translate(-2px, -1px); }
+}
+
+@keyframes sighChest {
+  0%, 100% { transform: translateY(0) scaleX(1); }
+  24% { transform: translateY(-6px) scaleX(1.022); }
+  46% { transform: translateY(3px) scaleX(0.984); }
+  64% { transform: translateY(4.5px) scaleX(0.978); }
+  82% { transform: translateY(-1px) scaleX(1.006); }
+}
+
+@keyframes sighHead {
+  0%, 100% { transform: rotate(0deg) translate(0, 0); }
+  22% { transform: rotate(-1.6deg) translate(0, -3.5px); }
+  48% { transform: rotate(3.2deg) translate(0, 6px); }
+  66% { transform: rotate(2.6deg) translate(0, 7.5px); }
+  86% { transform: rotate(-0.6deg) translate(0, 1px); }
+}
+
+@keyframes sighJaw {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  40% { transform: translateY(1.5px) scaleY(1.02); }
+  58% { transform: translateY(5px) scaleY(1.12); }
+  76% { transform: translateY(2.6px) scaleY(1.06); }
+}
+
+@keyframes sighHem {
+  0%, 100% { transform: rotate(0deg); }
+  30% { transform: rotate(-1.4deg); }
+  58% { transform: rotate(1.8deg); }
+  80% { transform: rotate(-0.6deg); }
+}
+
+@keyframes shiverBody {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  8% { transform: translate(-2.6px, 0) rotate(-0.55deg); }
+  18% { transform: translate(2.8px, -0.6px) rotate(0.6deg); }
+  28% { transform: translate(-2.4px, 0) rotate(-0.5deg); }
+  40% { transform: translate(2.2px, -0.4px) rotate(0.45deg); }
+  54% { transform: translate(-1.6px, 0) rotate(-0.32deg); }
+  70% { transform: translate(1.1px, 0) rotate(0.22deg); }
+  86% { transform: translate(-0.5px, 0) rotate(-0.1deg); }
+}
+
+@keyframes shiverHead {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  8% { transform: translate(1.6px, 0) rotate(0.7deg); }
+  18% { transform: translate(-1.8px, 0.4px) rotate(-0.8deg); }
+  28% { transform: translate(1.5px, 0) rotate(0.62deg); }
+  40% { transform: translate(-1.3px, 0) rotate(-0.5deg); }
+  54% { transform: translate(0.9px, 0) rotate(0.36deg); }
+  70% { transform: translate(-0.6px, 0) rotate(-0.24deg); }
+  86% { transform: translate(0.3px, 0) rotate(0.1deg); }
+}
+
+@keyframes shiverArmL {
+  0%, 100% { transform: rotate(0deg); }
+  12% { transform: rotate(5deg); }
+  26% { transform: rotate(2deg); }
+  44% { transform: rotate(5.5deg); }
+  62% { transform: rotate(2.5deg); }
+  80% { transform: rotate(4deg); }
+}
+
+@keyframes shiverArmR {
+  0%, 100% { transform: rotate(0deg); }
+  12% { transform: rotate(-5deg); }
+  26% { transform: rotate(-2deg); }
+  44% { transform: rotate(-5.5deg); }
+  62% { transform: rotate(-2.5deg); }
+  80% { transform: rotate(-4deg); }
+}
+
+@keyframes shiverHem {
+  0%, 100% { transform: rotate(0deg); }
+  10% { transform: rotate(0.9deg); }
+  22% { transform: rotate(-0.8deg); }
+  34% { transform: rotate(0.7deg); }
+  48% { transform: rotate(-0.5deg); }
+  64% { transform: rotate(0.35deg); }
+  82% { transform: rotate(-0.2deg); }
+}
+
+@keyframes eyeSquint {
+  0%, 100% { transform: scaleY(var(--eye-open, 1)); }
+  22% { transform: scaleY(calc(var(--eye-open, 1) * 0.62)); }
+  48% { transform: scaleY(calc(var(--eye-open, 1) * 0.7)); }
+  74% { transform: scaleY(calc(var(--eye-open, 1) * 0.75)); }
+}
+
+@keyframes lookBackHead {
+  0%, 100% { transform: rotate(0deg) translate(0, 0); }
+  14% { transform: rotate(-2.4deg) translate(-2px, 0); }
+  40% { transform: rotate(9deg) translate(9px, -1px); }
+  58% { transform: rotate(11deg) translate(11px, -1.5px); }
+  76% { transform: rotate(6deg) translate(6px, 0); }
+}
+
+@keyframes lookBackBody {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  14% { transform: translateY(0) rotate(-0.8deg); }
+  40% { transform: translateY(-2px) rotate(2.4deg); }
+  58% { transform: translateY(-2.5px) rotate(3deg); }
+  78% { transform: translateY(-1px) rotate(1deg); }
+}
+
+@keyframes lookBackNeck {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  40% { transform: translate(4px, 0) rotate(2deg); }
+  60% { transform: translate(4.5px, -0.5px) rotate(2.4deg); }
+}
+
+@keyframes nodHead {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  26% { transform: translate(0, 9px) rotate(1.1deg); }
+  52% { transform: translate(0, -3.5px) rotate(-0.6deg); }
+  76% { transform: translate(0, 4px) rotate(0.5deg); }
+}
+
+@keyframes nodBody {
+  0%, 100% { transform: translateY(0); }
+  26% { transform: translateY(3px); }
+  52% { transform: translateY(-1.4px); }
+  76% { transform: translateY(1.6px); }
+}
+
+@keyframes startleHead {
+  0% { transform: translate(0, 0) scale(1); }
+  12% { transform: translate(0, -10px) scale(1.05); }
+  32% { transform: translate(0, 5px) scale(0.985); }
+  54% { transform: translate(0, -3.5px) scale(1.012); }
+  76% { transform: translate(0, 1.4px) scale(1); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+@keyframes startleBody {
+  0%, 100% { transform: translateY(0) scaleX(1); }
+  12% { transform: translateY(-7px) scaleX(0.975); }
+  34% { transform: translateY(4px) scaleX(1.015); }
+  58% { transform: translateY(-2px) scaleX(0.995); }
+  80% { transform: translateY(0.8px) scaleX(1); }
+}
+
+@keyframes startleJaw {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  14% { transform: translateY(4px) scaleY(1.14); }
+  46% { transform: translateY(3px) scaleY(1.1); }
+  78% { transform: translateY(1px) scaleY(1.03); }
+}
+
+@keyframes startleArmL {
+  0%, 100% { transform: rotate(0deg) translate(0, 0); }
+  16% { transform: rotate(-13deg) translate(-2px, -3px); }
+  44% { transform: rotate(-8deg) translate(-1px, -1px); }
+  76% { transform: rotate(-2deg); }
+}
+
+@keyframes startleArmR {
+  0%, 100% { transform: rotate(0deg) translate(0, 0); }
+  16% { transform: rotate(13deg) translate(2px, -3px); }
+  44% { transform: rotate(8deg) translate(1px, -1px); }
+  76% { transform: rotate(2deg); }
+}
+
+@keyframes startleHem {
+  0%, 100% { transform: rotate(0deg); }
+  14% { transform: rotate(-1.6deg); }
+  40% { transform: rotate(1.1deg); }
+  68% { transform: rotate(-0.5deg); }
+}
+
+@keyframes eyeWide {
+  0%, 100% { transform: scaleY(var(--eye-open, 1)); }
+  16% { transform: scaleY(calc(var(--eye-open, 1) * 1.22)); }
+  50% { transform: scaleY(calc(var(--eye-open, 1) * 1.14)); }
+  82% { transform: scaleY(calc(var(--eye-open, 1) * 1.04)); }
+}
+
+@keyframes sweatDrop {
+  0%, 100% { opacity: 0.35; transform: translateY(0) scale(0.9); }
+  40% { opacity: 0.95; transform: translateY(3px) scale(1); }
+  70% { opacity: 0.5; transform: translateY(9px) scale(0.86); }
+}
+
+@keyframes sparkBurst {
+  0%, 100% { opacity: 0.35; transform: scale(0.75); }
+  45% { opacity: 1; transform: scale(1.12); }
+  70% { opacity: 0.6; transform: scale(0.92); }
+}
+
+/* ---- 身体参与加码：别头发 / 惊到 让肩、躯干、衣摆一起走 -----------------
+   （笔试要求：动作不能只有脸在动，所以这三条把上半身全带上） */
+
+.char-rig[data-act="hair_tuck"] .char-shoulders {
+  animation: tuckBody var(--act-dur, 1240ms) ease-in-out both;
+}
+.char-rig[data-act="hair_tuck"] .char-torso {
+  animation: tuckTorso var(--act-dur, 1240ms) ease-in-out both;
+}
+.char-rig[data-act="hair_tuck"] .char-hem {
+  animation: tuckHem var(--act-dur, 1240ms) ease-in-out both;
+}
+.char-rig[data-act="startle"] .char-torso {
+  animation: startleTorso var(--act-dur, 620ms) cubic-bezier(0.2, 0.9, 0.2, 1) both;
+}
+
+@keyframes tuckBody {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  20% { transform: translateY(-2px) rotate(-0.6deg); }
+  46% { transform: translateY(-5px) rotate(-2.2deg); }
+  62% { transform: translateY(-5.5px) rotate(-2.6deg); }
+  82% { transform: translateY(-1.5px) rotate(-0.5deg); }
+}
+
+@keyframes tuckTorso {
+  0%, 100% { transform: rotate(0deg); }
+  22% { transform: rotate(-0.8deg); }
+  46% { transform: rotate(-2.4deg); }
+  64% { transform: rotate(-2.8deg); }
+  84% { transform: rotate(-0.6deg); }
+}
+
+@keyframes tuckHem {
+  0%, 100% { transform: rotate(0deg); }
+  24% { transform: rotate(1.1deg); }
+  48% { transform: rotate(2.2deg); }
+  66% { transform: rotate(2.6deg); }
+  86% { transform: rotate(0.6deg); }
+}
+
+@keyframes startleTorso {
+  0%, 100% { transform: rotate(0deg); }
+  14% { transform: rotate(-1.7deg); }
+  40% { transform: rotate(0.9deg); }
+  70% { transform: rotate(-0.35deg); }
+}
+
+/* ------------------------------------------------------------------ 视觉事件
+
+   不是定时器：lastBeat 一变，这一层被重挂一次，播一遍就消失。
+*/
+
+.stage-beat {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  mix-blend-mode: screen;
+}
+
+.stage-beat::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(66% 46% at 50% 38%, rgba(255, 232, 196, 0.6), transparent 70%);
+  animation: beatFlash 1000ms cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+
+.stage-beat[data-tone="1"]::before {
+  background: radial-gradient(66% 46% at 50% 38%, rgba(196, 226, 255, 0.6), transparent 70%);
+}
+
+.stage-beat[data-tone="2"]::before {
+  background: radial-gradient(80% 56% at 42% 30%, rgba(255, 208, 152, 0.68), transparent 72%);
+}
+
+.beat-sweep {
+  position: absolute;
+  inset: -24% -46%;
+  background: linear-gradient(
+    102deg,
+    transparent 40%,
+    rgba(255, 244, 224, 0.5) 50%,
+    transparent 60%
+  );
+  animation: beatSweep 980ms cubic-bezier(0.3, 0.5, 0.2, 1) forwards;
+}
+
+.beat-ring {
+  position: absolute;
+  top: 38%;
+  left: 50%;
+  width: 130px;
+  height: 130px;
+  translate: -50% -50%;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 232, 196, 0.75);
+  animation: beatRing 950ms cubic-bezier(0.2, 0.7, 0.3, 1) forwards;
+}
+
+/* ------------------------------------------------------------------ HUD */
+
+.stage-hud {
+  position: absolute;
+  top: calc(14px + env(safe-area-inset-top));
+  left: 18px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(242, 238, 233, 0.55);
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.8);
+}
+
+.hud-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #8fd7a8;
+  box-shadow: 0 0 10px rgba(143, 215, 168, 0.8);
+  transition: background 400ms ease, box-shadow 400ms ease;
+}
+
+.hud-name {
+  color: rgba(255, 240, 222, 0.92);
+  font-weight: 600;
+  letter-spacing: 0.22em;
+}
+
+.hud-state { color: rgba(242, 238, 233, 0.42); letter-spacing: 0.1em; }
+
+.stage-root[data-status="listening"] .hud-dot { background: #7fc4ff; box-shadow: 0 0 12px rgba(127, 196, 255, 0.9); }
+.stage-root[data-status="thinking"] .hud-dot { background: #c8b6ff; box-shadow: 0 0 12px rgba(200, 182, 255, 0.85); }
+.stage-root[data-status="speaking"] .hud-dot { background: var(--amber-hot); box-shadow: 0 0 12px rgba(255, 216, 160, 0.95); }
+
+/* ------------------------------------------------------------------ 底部 UI */
+
+.stage-ui {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 14px calc(12px + env(safe-area-inset-bottom));
+  pointer-events: none;
+}
+
+.stage-ui > * { pointer-events: auto; }
+
+/* 字幕：底部安全区，长文本限 5 行并优雅截断，绝不遮脸 */
+.stage-subtitle {
+  position: relative;
+  max-height: 30cqh;
+  padding: 12px 16px 14px;
+  overflow: hidden;
+  border-radius: 20px;
+  background: linear-gradient(
+    180deg,
+    rgba(6, 10, 17, 0) 0%,
+    rgba(6, 10, 17, 0.62) 32%,
+    rgba(6, 10, 17, 0.82) 100%
+  );
+  transition: opacity 340ms ease;
+}
+
+.stage-subtitle[data-empty="true"] { opacity: 0; }
+
+.sub {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(14.5px, 4vw, 17.5px);
+  line-height: 1.68;
+  color: #f5f1ec;
+  text-align: center;
+  letter-spacing: 0.012em;
+  text-wrap: pretty;
+  text-shadow: 0 1px 14px rgba(0, 0, 0, 0.8);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  animation: subIn 480ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+/* 分支选项 */
+.stage-branches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.branch {
+  padding: 9px 15px;
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.25;
+  color: #ffe9c9;
+  cursor: pointer;
+  appearance: none;
+  background: linear-gradient(180deg, rgba(66, 45, 28, 0.86), rgba(28, 20, 14, 0.9));
+  border: 1px solid rgba(255, 196, 130, 0.34);
+  border-radius: 999px;
+  box-shadow:
+    0 8px 20px -8px rgba(0, 0, 0, 0.8),
+    inset 0 1px 0 rgba(255, 228, 194, 0.16);
+  backdrop-filter: blur(10px);
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.3, 1), border-color 220ms ease,
+    background 220ms ease;
+  animation: branchIn 460ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+.branch:nth-child(2) { animation-delay: 70ms; }
+.branch:nth-child(3) { animation-delay: 140ms; }
+.branch:nth-child(4) { animation-delay: 210ms; }
+
+.branch:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 214, 155, 0.62);
+}
+
+.branch:active { transform: translateY(0) scale(0.985); }
+.branch:focus-visible { outline: 2px solid rgba(255, 214, 155, 0.8); outline-offset: 2px; }
+
+/* 交互入口槽位：上层注入文字/语音控件的地方 */
+.stage-dock {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 56px;
+}
+
+.stage-dock:empty::after {
+  content: "输入或说话…";
+  padding: 11px 20px;
+  font-size: 13px;
+  color: rgba(240, 236, 230, 0.4);
+  background: rgba(10, 14, 20, 0.42);
+  border: 1px dashed rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+}
+
+/* ------------------------------------------------------------------ 情绪 → 环境色温 */
+
+.stage-root[data-emotion="warm"] .warm-pool,
+.stage-root[data-emotion="amused"] .warm-pool { filter: blur(8px); }
+
+.stage-root[data-emotion="anxious"] .haze,
+.stage-root[data-emotion="sad"] .haze { opacity: 1.4; }
+
+/* 思考：背景降饱和 + 雨声「视觉上」减弱（留白更多、雨丝变淡） */
+.stage-root[data-status="thinking"] .sc-room {
+  filter: blur(2.4px) saturate(0.4) brightness(0.88);
+}
+
+.stage-root[data-status="thinking"] .sc-window {
+  filter: blur(1.1px) saturate(0.36) brightness(0.9);
+}
+
+.stage-root[data-status="thinking"] .sc-warm {
+  filter: saturate(0.5) brightness(0.94);
+}
+
+.stage-root[data-status="thinking"] .rain-sheet { opacity: 0.34; }
+
+/* 倾听：环境稍微向角色聚焦（背景压暗一档） */
+.stage-root[data-status="listening"] .sc-room { filter: blur(2px) brightness(0.86); }
+.stage-root[data-status="listening"] .warm-pool { filter: blur(7px); }
+
+/* ------------------------------------------------------------------ 关键帧 */
+
+@keyframes sheetFall {
+  from { transform: translate3d(0, -50%, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+
+@keyframes dropletSlide {
+  0% { transform: translate3d(0, 0, 0) scale(0.9); opacity: 0.25; }
+  45% { opacity: 0.6; }
+  100% { transform: translate3d(2px, 30px, 0) scale(1.05); opacity: 0.12; }
+}
+
+@keyframes steamRise {
+  0% { transform: translate3d(0, 12px, 0) scale(0.7); opacity: 0; }
+  28% { opacity: 0.85; }
+  100% { transform: translate3d(8px, -74px, 0) scale(1.3); opacity: 0; }
+}
+
+@keyframes flashFlicker {
+  0%, 100% { opacity: 0.18; }
+  6% { opacity: 1; }
+  12% { opacity: 0.28; }
+  20% { opacity: 0.92; }
+  34% { opacity: 0.16; }
+  58% { opacity: 0.4; }
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(1, 1) translateY(0); }
+  50% { transform: scale(1.006, 1.012) translateY(-1.4px); }
+}
+
+@keyframes speakBob {
+  0%, 100% { transform: translate3d(0, 0, 0) rotate(0deg); }
+  32% { transform: translate3d(0, 2px, 0) rotate(0.45deg); }
+  66% { transform: translate3d(0, -1.2px, 0) rotate(-0.3deg); }
+}
+
+@keyframes earPulse {
+  0%, 100% { opacity: calc(var(--ear-glow, 0) * 0.55); }
+  50% { opacity: var(--ear-glow, 0); }
+}
+
+@keyframes mote {
+  0% { transform: translate3d(0, 6px, 0); opacity: 0; }
+  30% { opacity: 0.8; }
+  100% { transform: translate3d(-6px, -22px, 0); opacity: 0; }
+}
+
+@keyframes sparkle {
+  0%, 92%, 100% { opacity: 0; transform: scale(0.6); }
+  94% { opacity: 1; transform: scale(1.5); }
+  96% { opacity: 0.2; transform: scale(1); }
+}
+
+@keyframes dropTwinkle {
+  0%, 100% { opacity: 0.28; }
+  50% { opacity: 0.62; }
+}
+
+@keyframes beatFlash {
+  0% { opacity: 0; }
+  10% { opacity: 1; }
+  46% { opacity: 0.5; }
+  100% { opacity: 0; }
+}
+
+@keyframes beatSweep {
+  0% { transform: translate3d(-64%, 0, 0); opacity: 0; }
+  18% { opacity: 0.85; }
+  100% { transform: translate3d(64%, 0, 0); opacity: 0; }
+}
+
+@keyframes beatRing {
+  0% { transform: scale(0.35); opacity: 0.9; }
+  100% { transform: scale(2.9); opacity: 0; }
+}
+
+@keyframes subIn {
+  from { opacity: 0; transform: translate3d(0, 7px, 0); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes branchIn {
+  from { opacity: 0; transform: translate3d(0, 10px, 0) scale(0.96); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ------------------------------------------------------------------ 无障碍
+
+   prefers-reduced-motion：关掉所有循环与一次性动画，
+   但状态之间的差异（姿势位移、表情、色温、景深）全部保留 —— 靠过渡直接到位。
+*/
+
+@media (prefers-reduced-motion: reduce) {
+  .stage-root *,
+  .stage-root *::before,
+  .stage-root *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0ms !important;
+    transition-duration: 1ms !important;
+  }
+
+  .stage-root .rain-sheet { animation: none !important; }
+  .stage-root .lightning span { opacity: 0.55; }
+  .stage-root .sub { animation: none !important; }
+}

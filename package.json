@@ -1,0 +1,25 @@
+{
+  "name": "mira-scene",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run scripts/dev.ts",
+    "start": "bun run src/server/index.ts",
+    "build": "vite build",
+    "preview": "NODE_ENV=production bun run src/server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.14"
+  }
+}

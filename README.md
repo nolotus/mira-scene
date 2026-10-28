@@ -1,0 +1,139 @@
+# Mira · 打烊前的咖啡馆
+
+一个实时语音互动的**场景化角色产品**的 MVP：用户面对的不是聊天消息列表，而是一个身处具体环境中的角色——暴雨后的夜晚，26 岁的旅行摄影师 Mira 穿着琥珀色雨衣、别着银色星星发夹，在即将打烊的咖啡馆里等一个不愿说出原因的人。
+
+角色会说话、会改表情和动作、会因为你的一句话触发一段画面演出（闪电、雨势、镜头抖动、灯光变暗）。她说话时你可以**打断**她，打断之后她真的会停下来。
+
+> 这是 72 小时 take-home 的实现。设计取舍、已知问题与下一步演进都写在本文件里，没有藏着。
+> 演示地址：<https://mira.nolo.chat>（Mock 导演，零密钥，打开即用）
+> 演示脚本：[`docs/demo-script.md`](docs/demo-script.md)　AI 使用说明：[`AI_USAGE.md`](AI_USAGE.md)
+
+## 快速开始
+
+```bash
+bun install
+bun run dev          # 前端 5173 + 服务端 8787，一条命令
+```
+
+打开 <http://localhost:5173> 即可。**不需要任何 API 密钥**——默认 Mock 导演，完整流程（文字、语音、打断、演出、失败降级）都能跑。
+
+接真模型（可选）：
+
+```bash
+DEEPSEEK_API_KEY=<key> DIRECTOR=live bun run dev
+```
+
+也可用 `MIRA_LLM_BASE_URL` / `MIRA_LLM_API_KEY` / `MIRA_LLM_MODEL` 指向任意 OpenAI 兼容端点（优先级最高）。
+
+生产构建：`bun run build && NODE_ENV=production bun run start`（服务端会从 `dist/` 提供静态文件）。
+
+## 架构
+
+```mermaid
+flowchart LR
+  U[用户<br/>文字 / 语音] --> C[客户端会话机<br/>epoch + turnId 双闸门]
+  C -->|POST /api/turn| S[服务端<br/>Bun.serve]
+  S --> D{导演}
+  D -->|默认| M[Mock 导演<br/>零密钥]
+  D -->|DIRECTOR=live| L[真模型<br/>OpenAI 兼容]
+  M --> E[SessionEvent 流<br/>SSE]
+  L --> E
+  E -->|丢弃过期事件| C
+  C --> R[SceneState]
+  R --> V[渲染层<br/>纯函数]
+  R --> Q[Cue 编排层<br/>一段两秒的演出]
+  R --> T[TTS<br/>浏览器语音 / audio.chunk]
+```
+
+四个模块，边界刻意画清楚：
+
+| 模块 | 职责 | 关键文件 |
+|---|---|---|
+| 协议 | 指令与事件的**唯一契约**，前后端共用类型 | `src/shared/protocol.ts` |
+| 服务端 | SSE 流、会话历史、导演、指令白名单校验 | `src/server/**` |
+| 会话机 | 状态归约、打断、迟到事件丢弃、语音链路 | `src/web/state/**`、`src/web/voice/**` |
+| 渲染 | 纯展示，不自己发请求；演出编排 | `src/web/stage/**` |
+
+**渲染层是纯函数**：`SceneState + Directive → SceneState`。同一个状态喂给渲染层永远得到同一画面，所以 Mock 导演、真模型导演、以及将来的回放模式**共用同一条渲染路径**——回放不需要另写一遍动画。
+
+## 打断是怎么做对的
+
+题目里最硬的一条是：打断后「上一轮迟到的网络响应不得覆盖当前状态或重新播放」。只调用 `AbortController.abort()` 是不够的——已经离开服务端、正在网络里飞行的事件帧收不回来。
+
+所以用**双闸门**：
+
+1. 客户端维护单调递增的 `epoch`，每次打断 +1，并写进请求；
+2. 服务端把 `epoch` **原样回显**到每一条事件上；
+3. 客户端入口 `reduceEvent()` 先比 `epoch`、再比 `turnId`，不匹配的直接丢（`stale-epoch` / `stale-turn`），碰不到状态；
+4. 音频播放器在 `epoch` 变化时立即 `stop` 并清空队列；
+5. 浏览器 TTS（`speechSynthesis`）用**代际令牌**忽略过期 `onend` 回调——否则「打断后状态又被拉回 speaking」是必然出现的假象。
+
+界面上有一行 **「丢弃迟到事件 N」**，是这条护栏的可见证据：打断之后旧事件还在往回飞，但进不来。
+
+验收方式不是「看起来对」：真服务端上**连续打断 10 次**，每次断言 `turn.end{interrupted:true}` 是最后一条事件、事件里的 `epoch` 只有一个值。结果 10/10 通过。
+
+## 角色与场景指令
+
+模型（或 Mock 脚本）不直接改 DOM，只产出结构化指令：
+
+```ts
+type Directive =
+  | { kind: "emotion"; emotion: "neutral" | "curious" | "warm" | "amused" | "anxious" | "sad" | "surprised" }
+  | { kind: "pose"; pose: "stand" | "lean_in" | "turn_away" | "hold_cup" | "glance_window" }
+  | { kind: "action"; action: "blink" | "hair_tuck" | "sigh" | "shiver" | "look_back" | "nod" | "startle" }
+  | { kind: "camera"; move: "push_in" | "pull_back" | "whip_pan" | "shake" | "settle" }
+  | { kind: "vfx"; vfx: "lightning" | "rain_heavy" | "rain_light" | "warm_glow" | "lights_dim" | "steam_wisp" }
+  | { kind: "scene"; scene: "cafe_night" | "cafe_closing" | "window_rain" }
+  | { kind: "branch"; options: { id: string; label: string }[] };
+```
+
+真模型输出必须过**白名单校验**（`src/server/scene/validate.ts`），非法枚举值直接丢弃——不信任模型。
+
+**演出编排（cue）** 把离散指令编成一段有时长的演出：闪电 → 120–260ms 后雨势变化 → 镜头抖动 → 角色一颤。四套模板（storm / window_call / warm_beat / close_down）按指令语义命中，**闪电只在 storm 里存在**（有结构性测试锁死），所以「不管你说什么都放闪电」在结构上不可能发生。400ms 内同类触发会合并、打断时旧 cue 淡出而不是硬切。
+
+## 多模态能力与取舍
+
+题目要求至少一种多模态表现。这里选的是 **程序化分层角色**（SVG + CSS 分层：发/脸/眉/眼/嘴/雨衣/发夹/袖口），理由是：**零素材授权风险、无 GPU、且天然可以被指令逐层驱动**。
+
+代价我承认：表现力上限低于 Live2D/Rive。为此补了两件事——身体参与的动作（别头发时肩/躯干/手臂/下摆一起动，而不只是动脸），以及上面那层 cue 演出编排。
+
+**没有做**：状态驱动的视频片段、生成式图片/短视频（本机无 GPU、无可用图像模型密钥）。题目允许在四种多模态里任选其一，这里选了成本最低但可控的一种，并把取舍写在这里而不是藏起来。
+
+## 失败与降级
+
+评审可以当场弄坏它，都能看到明确反馈：
+
+| 故障 | 怎么触发 | 你会看到 |
+|---|---|---|
+| 服务未启动 | 不起服务直接开页面 | 提示条 + 「重新连接」，角色照常预览，不白屏 |
+| 会话中途断线 | 对话中杀掉服务端 | 提示条转为断线；重启后点「重新连接」可继续，角色状态与历史不丢 |
+| 首字超时 | `?demo=timeout` | 8s 后提示「模型 8s 内没有响应」+ 重试，状态回到待机（不卡 thinking） |
+| 请求失败 | `?demo=fail` | 走真实失败分支 + 重试；第二次请求恢复正常 |
+| TTS 抛错 | `?demo=tts` | 红色提示条说明「会影响角色表演，但文字对话仍可继续」 |
+| 麦克风被拒 | 浏览器弹权限时点拒绝 | 区分「权限被拒 / 浏览器不支持 / 非安全上下文」三种文案，都给替代入口（打字、按住说话） |
+| 渲染期异常 | Stage 抛错 | 画面区降级为提示 + 「重新渲染画面」，dock 仍可用 |
+
+`?demo=*` 是**录屏专用**开关：注入的是真实代码路径上的故障，不是假提示；右上角会标注「演示模式：人为故障」，且只注入一次、重试即恢复。
+
+## 已知问题
+
+- **`playedBeats` 只保留最近一个 beat**：真模型导演防「重复演出」的能力因此偏弱（Mock 靠 once 标记不受影响）。
+- **口型在全身图里偏小**：嘴宽约 26/400 视口，只有放大裁图才明显；1× 全身观感上「嘴动得不够」。
+- **`hair_tuck` 是几何近似**：手臂用透视缩短 + 位移模拟，手没有真正碰到发夹。
+- **雨势强度用透明度与速度表达**，没有动态增减雨丝数量。
+- **语音识别依赖浏览器**：`webkitSpeechRecognition` 仅 Chrome/Edge，且它走厂商云端识别，某些网络下会报 `network` 错误——此时打字入口仍可用。
+- **部署的 Caddy 段是手工追加的**：`mira.nolo.chat` 的站点块写在 alpha 的 `/etc/caddy/Caddyfile` 末尾，而该文件由 `scripts/release/configureCaddyProxy.sh` 生成，**重跑部署脚本会覆盖它**，需要重新追加（文件里已写警示注释）。
+
+## 投入时间
+
+构建以一个主控 + 若干并行执行单元的方式推进：协议与验收标准由人先定死，模块实现与自查交给执行单元，人负责逐项复核（跑 typecheck/test/build、真服务端 curl 走 SSE 与 cancel、连续打断压力测试、逐张看截图）。
+
+坦白说，**AI 承担了大部分代码量**，人工时间花在三处：把契约写死、判断哪些取舍值得做（砍掉通用动画系统与真 TTS 接入）、以及验收时挑出「看着对其实不对」的地方——例如 Mock 导演在第 3 轮把开场白当成回话（已修 + 补回归测试）、角色右眼闭着（已修）、雨丝画在角色前面（已修）。
+
+## 再给两周，我会这样演进
+
+1. **表现力**：把程序化角色换成 Spine/Rive 骨架 + 一套手绘动作，保留现有 `Directive → 骨架参数` 的映射层（这层不用改）。
+2. **真语音**：接流式 TTS（协议里 `audio.chunk` 已经预留，`StreamTTS` 路径已实现但当前无可用服务商），并把打断的粒度从「整轮」细化到「当前句」。
+3. **真模型导演**：目前是单次 `json_object` 调用。下一步改成「状态机 + 轻量规划」：先产出本轮意图，再产出台词与指令，避免长回复时指令与台词对不齐。
+4. **回放与诊断**：事件流已经是有序的 `SessionEvent`，只要把一轮的事件存下来就是回放；诊断页已经有 timings 与丢弃计数。
+5. **一致性**：把 `playedBeats` 扩成有界历史，让真模型导演知道「哪些演出已经演过」，避免重复。
