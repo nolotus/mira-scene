@@ -18,7 +18,9 @@ import { PhotoCharacter } from "./characters/PhotoCharacter";
 import { parseCharFlag } from "./characters/portraitRuntime";
 import { prefetchLine, prefetchSnapshot, startPrefetchAfterLoad, subscribePrefetch } from "./preload";
 import { ClipPlayer } from "./clip/ClipPlayer";
-import { Cues } from "./Cues";
+// 显式扩展名：本目录同时存在 cues.ts（数据层）与 Cues.tsx（渲染层），
+// 在大小写不敏感的文件系统（macOS 默认 APFS）上裸写 "./Cues" 会先命中 cues.ts。
+import { Cues } from "./Cues.tsx";
 import { IllustrationLayer } from "./illustration/IllustrationLayer";
 import { StageBackdrop } from "./StageBackdrop";
 import { STATUS_LABEL, toneOf, vfxVars } from "./visuals";
