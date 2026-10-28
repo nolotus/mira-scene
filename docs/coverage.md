@@ -12,7 +12,7 @@
 |---|---|---|---|---|
 | ① | 场景化界面（非聊天列表）+ 待机/倾听/思考/说话 4 态 | **做完** | `StageBackdrop.tsx` 4 层景深；四态见 `visuals.ts STATUS_SPEC`；截图 `/tmp/shots/live-idle-*.png`（三时刻采样验证非动画假象） | —（构图微调已做：`bottom:30%/height:56%`） |
 | ② | 文字 + 麦克风互动，语音回复 + 同步字幕，多轮 | **做完** | STT：Deepgram `nova-2`(zh) 服务端 WS 代理，实测 `1×speech_started + 3×interim + 1×final`（final 滞后约 1.1s）；TTS：中文 Edge `zh-CN-XiaoxiaoNeural`（round-trip 置信度 1.00）、英文 Deepgram Aura。**中文 TTS 延迟实测**：CLI 路径 1711ms → 原生 WS 热连接 **287ms**（冷启动首次握手 1192ms） | — |
-| ③ | 语音打断五条后果 + 迟到响应不重播 | **部分**（机制已修，缺真机证据） | 五步链路 `bargeIn.ts performBargeIn`；`epoch+turnId` 双闸门（真服务端连打断 10 次 0 失效）；TTS 代际令牌；「丢弃迟到事件 N」可见。**根因已修**：`deepgramStt.ts` 曾在 WS 握手（约 1s）期间直接丢弃 MediaRecorder 音频 → Deepgram 收不到音频、不发 `speech_started`；现改为有界 pre-roll 队列（1.5s 上限，超限丢最旧并计数）。**单一触发源**：`barge-in source: deepgram / energy / none` 三态，源不匹配的信号不进闸门（有机械测试）。**真生产代码模块级 trace**：`speech_started → 音频停止 = 199.9ms`（含 200ms interim 确认窗口）；idle 时 `gate:ignore:not-speaking` 不打断 | **真机待验**：Chrome/Linux 常不报 `getSettings().echoCancellation`（本机即 `aec=unknown`），此时按保守策略 `source=none` → 自动语音打断**关闭**，只剩 Esc/按钮。真人外放是否会自打断，只有带真麦克风的机器能定 |
+| ③ | 语音打断五条后果 + 迟到响应不重播 | **做完（机制层）** | 五步链路 + `epoch+turnId` 双闸门（真服务端连打断 10 次 0 失效）+ TTS 代际令牌 + 「丢弃迟到事件 N」可见。**根因修复**：WS 握手期间丢音频 → pre-roll 有界队列（1.5s，超限丢最旧并计数）。**单一触发源**：`deepgram/energy/none` 三态，源不匹配不进闸门。**fire 时重新校验** `speaking`/`source`（arm 成立≠fire 成立）。**真浏览器实测**：`speech_started → 音频停止 200.2ms`。 | **真机待验**：AEC 未上报时按保守策略 `source=none`（自动语音打断关闭，只剩 Esc/按钮）；真人外放是否自打断只有真机可定 |
 | ④ | 结构化指令驱动画面（3 情绪 / 2 动作 / 1 场景变化 / 1 内容触发事件） | **做完** | 7 类 Directive；`CUE_TEMPLATES` 四套时序（storm 1800ms 四层）；输入「外面还在下雨吗」→ `shiver/lightning/rain_heavy/camera.shake/glance_window`；闪电只在 storm（结构性测试锁死）；**指令已锚定字符位置**（`atChar`，服务端按字符边界投递，老客户端退化为立即执行） | 客户端按水位排队接线（`state/session.ts` + `store.ts`），等 `state/**` 腾出 |
 | ⑤ | ≥1 种多模态 + 加载/结束/中断/失败 | **做完** | 真媒体片段：12 帧 spritesheet 145KB（程序化生成 + 自写调色板量化），四态真进分支，`?demo=media` 演示 404 降级；照片级角色 `?char=photo`（素材 + 变体 + 微动） | 照片版"贴上去"感（接触阴影/边缘色匹配） |
 | ⑥ | 闭环 + 超时断线失败反馈 + 连打断不播失效 + 无密钥可看核心流程 | **做完** | 9 类故障分支（`?demo=fail\|timeout\|tts\|media` 可注入）；Mock 零密钥跑通全部流程；缓存/配额/诊断齐全 | — |
@@ -36,12 +36,12 @@
 
 | 项 | 状态 | 证据 / 成本 | ROI |
 |---|---|---|---|
-| 自动检测开口并自然打断 | **部分** | `speech_started` + interim 确认 + 250ms 爬升期 + 400ms 防抖；AEC `getSettings()` 实测 true。**缺端到端时间线**（成本 0.5h） | **高**：③ 的头号能力 |
+| 自动检测开口并自然打断 | **做完（机制层）** | `speech_started` + interim 确认（200ms）+ 250ms 爬升期 + 400ms 防抖；真浏览器实测 200.2ms；AEC 不明时不放行 | 真机外放待验 |
 | 回声消除 | **部分** | 浏览器 `echoCancellation` 三件套 + 回读上报；长句回声仍可能自打断（成本 2h：加自适应阈值或改用半双工） | 中 |
 | 流式字幕 | **做完** | STT `interim_results`，边说边出字 | — |
 | 展示首包延迟/关键耗时 | **做完** | `timings.firstText/firstDirective/total` + 诊断面板 + `?trace=1` 时间线；中文 TTS 从 1711ms（CLI）降到 287ms（原生 WS 热连接），原生令牌按 `drm.py` 逐位移植、30 个时间戳全表对拍通过 | — |
 | 区分真打断与「嗯」「对」附和 | **部分** | 200ms + interim 确认挡短促噪声；**不做语义判别**（成本 1.5h：按 transcript 长度/词表过滤） | 中 |
-| 断线重连与会话恢复 | **部分** | 手动重连可用、状态与历史保留；**无自动重连退避**（成本 1h） | **高**：评审拔网线就会看 |
+| 断线重连与会话恢复 | **做完** | 指数退避 1/2/4/8s、5 次上限、用户操作立即唤醒、`offline` 暂停+`online` 重试；重连不清角色状态与历史 | 已知副作用：重连会新建会话，旧 sessionId 成孤儿 |
 
 ### 角色表演
 
@@ -50,7 +50,7 @@
 | 口型同步 | **做完** | SVG 4 相位按字幕节奏；照片版按音频播放 + 快语速退化两态 | — |
 | 眨眼/呼吸/视线/待机 | **做完** | 随机眨眼（含双眨）、4.6s 呼吸、倾听/思考位移 | — |
 | 情绪平滑过渡 | **做完** | 独立样式集交叉淡入 | — |
-| 动作优先级、中断、自然衔接 | **部分** | 动作跑独立子层不打断姿态；只取 `pendingActions[0]`（成本 1h：优先级队列） | 中 |
+| 动作优先级、中断、自然衔接 | **做完** | `startle 6 > shiver 5 > hair_tuck 4 > look_back 3 > sigh 2 > nod 1 > blink 0`；队列上限 3，`blink` 不占队列（背景动作） | — |
 | 音频驱动的角色动作 | **未做** | `AnalyserNode` 现只用于 VAD（成本 3h） | 低 |
 | 配置驱动的角色资源系统 | **故意未做** | 会变成通用动画框架，对本题是纯成本 | 不做 |
 
@@ -60,7 +60,7 @@
 |---|---|---|---|
 | 全屏片段与常驻角色衔接 | **做完** | 满屏 cover + 结束回落 | — |
 | 加载失败后的降级 | **做完** | 404/解码失败 → 静默回落 + 诊断留痕 | — |
-| 预加载与无黑屏切换 | **部分** | 有「载入中」提示、不阻塞；无预取（成本 0.5h） | **高**：首次演出那一顿很明显 |
+| 预加载与无黑屏切换 | **做完** | `load+365ms` 启动 `requestIdleCallback`，1639ms 内 8 项 decode 完成；`saveData` 跳过 | — |
 | 字幕/语音/视频时间线同步 | **未做** | 片段仅 1s（成本 2h） | 低 |
 | 透明视频/遮罩/分层合成 | **未做** | 无 ffmpeg 素材管线（成本 3h+） | 低 |
 
