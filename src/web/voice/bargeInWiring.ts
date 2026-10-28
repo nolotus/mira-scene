@@ -70,8 +70,11 @@ export class VoiceBargeInWiring {
   private suppressedEnergy = 0;
   private sourceMismatch = 0;
   /** 上次 `update()` 的输入：fire 时按同一份输入 + **实时** AEC 重新解析源 */
-  private lastInput: { bargeInEnabled: boolean; sttChannel: "deepgram" | "fake" | "webspeech" | "none" } | null =
-    null;
+  private lastInput: {
+    bargeInEnabled: boolean;
+    sttChannel: "deepgram" | "fake" | "webspeech" | "none";
+    supportsSpeechStarted?: boolean;
+  } | null = null;
 
   constructor(options: BargeInWiringOptions) {
     this.options = options;
@@ -119,12 +122,17 @@ export class VoiceBargeInWiring {
    * 重新解析触发源（开麦 / 换语言 / STT 回退 / AEC 实测结果变化时都要调）。
    * 返回解析结果，调用方据此决定要不要启动能量 VAD。
    */
-  update(input: { bargeInEnabled: boolean; sttChannel: "deepgram" | "fake" | "webspeech" | "none" }): BargeInSourceDecision {
+  update(input: {
+    bargeInEnabled: boolean;
+    sttChannel: "deepgram" | "fake" | "webspeech" | "none";
+    supportsSpeechStarted?: boolean;
+  }): BargeInSourceDecision {
     this.lastInput = input;
     const next = resolveBargeInSource({
       bargeInEnabled: input.bargeInEnabled,
       sttChannel: input.sttChannel,
       aec: this.options.aec(),
+      supportsSpeechStarted: input.supportsSpeechStarted,
     });
     const changed = next.source !== this.current.source || next.reason !== this.current.reason;
     this.current = next;

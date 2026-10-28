@@ -220,7 +220,10 @@ async function runStt(): Promise<void> {
         if (offset >= audio.byteLength) {
           clearInterval(timer);
           mark("audio:done");
-          // 模拟「说完」：停手，让上游自己收尾
+          // 模拟「说完」：浏览器端 stop() 就是发这条控制消息（服务端据此冲 final）。
+          // 不发的话只有 Deepgram 那条靠 endpointing 自己收尾，阿里整段识别会一直等。
+          ws.send(JSON.stringify({ type: "finish_utterance" }));
+          mark("finish_utterance");
           return;
         }
         ws.send(audio.slice(offset, offset + chunkSize));

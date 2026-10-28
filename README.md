@@ -155,6 +155,7 @@ SVG + CSS 分层（发/脸/眉/眼/嘴/雨衣/发夹/袖口），7 情绪 × 5 �
 |---|---|---|
 | 真模型导演 | 任意 OpenAI 兼容端点（本次用 lithosai `DeepSeek-V4.1-Flash`） | `?director=live` 时页面真跑通，首字 639ms；默认 mock，避免公开站烧额度 |
 | **语音识别（STT）** | **Deepgram `nova-2`，`language=zh`** | 走服务端 WS 代理（key 不进浏览器）。实测一句中文得到 `1× speech_started + 3× interim + 1× final`，**final 在说完后约 1.1 秒**出现 |
+| **语音识别（STT，第二通道）** | **阿里百炼 `fun-asr-flash`**（`DASHSCOPE_API_KEY`） | Deepgram key 被吊销时的回退：配了百炼 key 就**优先**走它，浏览器端协议不变（客户端感知不到换了供应商）。整段识别（无 interim），服务端先把 MediaRecorder 的 webm/opus 用 ffmpeg 转成 16k mono wav 再送上游；**不发 `speech_started`**（不伪造：假信号会让打断在错误时机触发），客户端 `bargeInSource` 因此退到 energy VAD |
 | 语音合成（英文） | Deepgram `aura-asteria-en`（服务端代理） | 返回真 MP3（实测 15,046 字节、MPEG 魔数正确）；走本项目既有的 `audio.chunk` 播放路径 |
 | 语音合成（中文） | **Edge TTS `zh-CN-XiaoxiaoNeural`**（服务端代理，非官方接口） | 音色可调（`--rate/-8% --pitch/-3Hz`）以贴近角色设定。**客观验证**：合成中文再经 Deepgram STT 转回，原句一字不差、置信度 **1.00**；同法测 Deepgram 自带的中文 TTS 只得 0.56（「外媒体验再次一码」）。代价：**每句 1.7–2.0 秒**（含 python 启动），第 1 句遮不掉，第 2 句起靠预取藏进播放时间 |
 | 参考图条件生成 | Cloudflare `flux-2-dev`（multipart 提交参考图） | **实测结论：保造型、不保脸。** 用同一张定妆照作参考、prompt 明写「identical face」，生成的人脸是三个不同的人；第二张连雨衣都丢了。所以「跨场景同一个人」这条**不能靠它实现**，只能靠「角色只生成一次 + 只换背景」 |

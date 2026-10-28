@@ -48,17 +48,34 @@ describe("GET /api/voice/status", () => {
       sttModel: "nova-2",
       // 没注入 Edge 桩、也没探测 → 中文合成不可用（回退浏览器，正常态）
       ttsZh: false,
+      // 能力上报：没配 provider → 没有通道
+      sttProvider: "none",
+      supportsSpeechStarted: true,
     } satisfies VoiceStatus);
     const res = await app.fetch(new Request("http://localhost/api/voice/status"));
     expect(res.status).toBe(200);
-    expect(await readJson(res)).toEqual({ stt: false, tts: false, sttModel: "nova-2", ttsZh: false });
+    expect(await readJson(res)).toEqual({
+      stt: false,
+      tts: false,
+      sttModel: "nova-2",
+      ttsZh: false,
+      sttProvider: "none",
+      supportsSpeechStarted: true,
+    });
   });
 
   test("有 key：stt / tts 都是 true，模型固定 nova-2（中文只有它能用）", async () => {
     const { app } = appWithVoice({ DEEPGRAM_API_KEY: FAKE_KEY });
     const res = await app.fetch(new Request("http://localhost/api/voice/status"));
     expect(res.status).toBe(200);
-    expect(await readJson(res)).toEqual({ stt: true, tts: true, sttModel: "nova-2", ttsZh: false });
+    expect(await readJson(res)).toEqual({
+      stt: true,
+      tts: true,
+      sttModel: "nova-2",
+      ttsZh: false,
+      sttProvider: "deepgram",
+      supportsSpeechStarted: true,
+    });
   });
 
   test("POST 不被接受（405）", async () => {
@@ -315,6 +332,8 @@ describe("createSttBridge", () => {
     upstream.onmessage?.({ data: '{"type":"SpeechStarted","timestamp":0.96}' });
 
     expect(probe.messages).toEqual([
+      // 建连后的第一条消息：能力上报（客户端据此知道能不能用 speech_started）
+      { type: "capabilities", provider: "deepgram", supportsSpeechStarted: true },
       { type: "interim", text: "外面还在" },
       { type: "speech_started" },
     ]);
@@ -377,7 +396,10 @@ describe("createSttBridge", () => {
         throw new Error("dns fail");
       },
     });
-    expect(probe.messages).toEqual([{ type: "error", reason: "upstream-unavailable" }]);
+    expect(probe.messages).toEqual([
+      { type: "capabilities", provider: "deepgram", supportsSpeechStarted: true },
+      { type: "error", reason: "upstream-unavailable" },
+    ]);
     expect(bridge.closed).toBe(true);
   });
 });
@@ -461,6 +483,7 @@ describe("createSttBridge 收尾（证伪/证实「硬断吞 final」假设）",
     upstream.onclose?.();
 
     expect(probe.messages).toEqual([
+      { type: "capabilities", provider: "deepgram", supportsSpeechStarted: true },
       { type: "interim", text: "外面还在" },
       { type: "final", text: "外面还在下雨吗,我在顿利" },
     ]);
@@ -484,7 +507,10 @@ describe("createSttBridge 收尾（证伪/证实「硬断吞 final」假设）",
     bridge.finishUtterance();
     upstream.onmessage?.({ data: '{"type":"UtteranceEnd","channel":[0],"last_word_end":2.5}' });
 
-    expect(probe.messages).toEqual([{ type: "utterance_end" }]);
+    expect(probe.messages).toEqual([
+      { type: "capabilities", provider: "deepgram", supportsSpeechStarted: true },
+      { type: "utterance_end" },
+    ]);
     expect(upstream.closed?.code).toBe(1000);
     expect(bridge.closed).toBe(false);
   });

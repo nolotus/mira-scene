@@ -497,7 +497,18 @@ export function App() {
    * 免得「界面上一个说法、trace 里另一个说法」。
    */
   const refreshSource = useCallback(() => {
-    const decision = wiring.update({ bargeInEnabled: boot.bargeIn, sttChannel: sttChannelOf() });
+    // 能力上报（服务端给的）：这条通道**会不会**发 speech_started。
+    // 阿里百炼整段识别不发 → 这里报 false → 触发源自动落到 energy VAD
+    //（AEC / 回声门禁不变）。**不伪造** speech_started。
+    const supportsSpeechStarted =
+      sttRef.current?.diagnostics.supportsSpeechStarted ??
+      voiceStatusRef.current?.supportsSpeechStarted ??
+      true;
+    const decision = wiring.update({
+      bargeInEnabled: boot.bargeIn,
+      sttChannel: sttChannelOf(),
+      supportsSpeechStarted,
+    });
     const mic = readMicDiagnostics();
     const aecSettings = describeAppliedMicSettings(mic.settings);
     const diag = {

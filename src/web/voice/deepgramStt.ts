@@ -85,6 +85,16 @@ export interface DeepgramSttDiagnostics {
   prerollFlushed: number;
   /** 预建连队列溢出被丢的最旧帧数（上限 ≈1.5s；>0 说明用户开口太早，需要说「再说一次」） */
   prerollDropped: number;
+  /**
+   * 服务端上报的「上游会不会发 `speech_started`」。
+   *
+   * 默认 true（Deepgram 会发）。阿里百炼 fun-asr 是整段识别，**不发**它 → 服务端
+   * 在 WS 建连后的第一条消息里上报 `false`，客户端据此把自动打断切到 energy VAD。
+   * 服务端**绝不伪造** speech_started（伪造比没有更糟：会在错误时机打断）。
+   */
+  supportsSpeechStarted: boolean;
+  /** 服务端上报的 provider（`ali` / `deepgram`；null = 还没收到能力消息） */
+  provider: string | null;
 }
 
 // ---------------------------------------------------------------- 浏览器最小接口
@@ -230,6 +240,9 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
     micSettings: null,
     prerollFlushed: 0,
     prerollDropped: 0,
+    // 能力默认「有 speech_started」：服务端的能力消息到了才会改（阿里是 false）
+    supportsSpeechStarted: true,
+    provider: null,
   };
 
   // 初始通道：Deepgram 能用就用它；否则**真的试一次** Web Speech（supported=false 的兜底
@@ -364,6 +377,16 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
     }
     if (type === "utterance_end") {
       options.onUtteranceEnd?.();
+      return;
+    }
+    if (type === "capabilities") {
+      // 服务端能力上报（WS 的第一条消息）：
+      // `supportsSpeechStarted:false` = 这条通道（阿里整段识别）**不发** speech_started
+      // → 上层要把自动打断切到 energy VAD（而不是等一个永远不会来的信号）。
+      const provider = typeof record.provider === "string" ? record.provider : null;
+      const supports = record.supportsSpeechStarted !== false;
+      setDiag({ provider, supportsSpeechStarted: supports });
+      log(`[stt] capabilities provider=${provider ?? "?"} speechStarted=${supports ? 1 : 0}`);
       return;
     }
     if (type === "error") {

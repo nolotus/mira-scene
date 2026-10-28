@@ -38,7 +38,9 @@ export type BargeInSourceReason =
   /** AEC 实测被忽略（`echoCancellation === false`） */
   | "aec-off"
   /** AEC 读不到（浏览器不报这个字段）→ 按「没有」处理 */
-  | "aec-unknown";
+  | "aec-unknown"
+  /** 这条 STT 通道**不发** `speech_started`（阿里百炼整段识别）→ 改走能量 VAD */
+  | "no-speech-started";
 
 export interface BargeInSourceInput {
   /** `?bargeIn=` 解析结果 */
@@ -47,6 +49,15 @@ export interface BargeInSourceInput {
   sttChannel: "deepgram" | "fake" | "webspeech" | "none";
   /** 麦克风轨道实测 AEC 状态 */
   aec: AecState;
+  /**
+   * 上游**会不会**发 `speech_started`（服务端能力上报，默认 true）。
+   *
+   * 阿里百炼 fun-asr 是整段识别，**不发** speech_started。客户端若仍按
+   * `channel:"deepgram"` 判定，就会在这条通道上把「自动语音打断」当成可用 ——
+   * 实际上永远等不到那个信号（打断静默失效）。所以这条能力必须显式传进来：
+   * false → 走 energy VAD（保留 AEC / 回声门禁），**不伪造** speech_started。
+   */
+  supportsSpeechStarted?: boolean;
 }
 
 export interface BargeInSourceDecision {
@@ -105,6 +116,19 @@ export function resolveBargeInSource(input: BargeInSourceInput): BargeInSourceDe
   }
 
   const deepgramAvailable = sttChannel === "deepgram" || fake;
+  // 这条通道**不发** speech_started（阿里百炼整段识别）：deepgram 触发源在这里是**空的**，
+  // 必须改走能量 VAD —— 否则「自动语音打断」在这条通道上静默失效。
+  // 能量 VAD 自带回声禁声窗口，AEC 门槛上面已经判过了。
+  if (deepgramAvailable && !fake && input.supportsSpeechStarted === false) {
+    return {
+      source: "energy",
+      reason: "no-speech-started",
+      detail:
+        "barge-in source: energy (no-speech-started) — " +
+        "这条 STT 通道（阿里整段识别）不发 speech_started，改用能量 VAD（带自己的回声禁声窗口）",
+      energyForLevelOnly: false,
+    };
+  }
   if (deepgramAvailable) {
     return {
       source: "deepgram",

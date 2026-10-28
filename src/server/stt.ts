@@ -25,7 +25,8 @@
  * 把 opus 字节塞进声明 linear16 的流，上游会按 PCM 去解释那段字节 —— 声音是错的，别混。
  */
 
-import type { DeepgramConfig } from "./config.ts";
+import type { DeepgramConfig, DashscopeConfig } from "./config.ts";
+import { createAliSttBridge, type EncoderFactory } from "./aliStt.ts";
 
 /** 中文只能用 nova-2：nova-3 对中文返回空结果（实测）。 */
 export const STT_MODEL = "nova-2";
@@ -75,7 +76,16 @@ export type SttClientMessage =
   | { type: "final"; text: string }
   | { type: "speech_started" }
   | { type: "utterance_end" }
-  | { type: "error"; reason: string };
+  | { type: "error"; reason: string }
+  /**
+   * 能力上报（WS 建连后的**第一条**消息）。
+   *
+   * 为什么要有它：不同 provider 给出的信号不一样 —— Deepgram 会发 `speech_started`
+   *（客户端拿它做「用户开口」的打断触发源），阿里百炼整段识别**不发**。
+   * 客户端必须知道这件事才能改走 energy VAD；服务端**绝不伪造** `speech_started`
+   *（伪造比没有更糟：会在错误时机触发打断）。
+   */
+  | { type: "capabilities"; provider: string; supportsSpeechStarted: boolean };
 
 /**
  * Deepgram 原始 payload → 精简消息。纯函数，空结果/无关消息回 null（不发给客户端）。
@@ -179,7 +189,13 @@ export interface BrowserSink {
 export type UpstreamConnect = (url: string, headers: Record<string, string>) => UpstreamSocket;
 
 export interface SttBridgeOptions {
-  config: DeepgramConfig;
+  /** Deepgram 凭据；null = 没配（这时必须有 dashscope，否则整条语音通道不可用） */
+  config: DeepgramConfig | null;
+  /**
+   * 阿里百炼凭据：**配了就优先用阿里**（Deepgram key 被吊销时的回退通道）。
+   * 为 null 时走下面的 Deepgram 老逻辑（保留，不删）。
+   */
+  dashscope?: DashscopeConfig | null;
   connect: UpstreamConnect;
   sink: BrowserSink;
   lang?: "zh-CN" | "en-US";
@@ -190,6 +206,8 @@ export interface SttBridgeOptions {
   maxPendingFrames?: number;
   /** 收尾等待上限（测试可调小；默认 FLUSH_TIMEOUT_MS） */
   flushTimeoutMs?: number;
+  /** 阿里通道的转码器工厂（测试注入假的，不依赖真实 ffmpeg） */
+  encoder?: EncoderFactory;
 }
 
 export interface SttBridge {
@@ -232,6 +250,56 @@ export function createSttBridge(options: SttBridgeOptions): SttBridge {
   const log = options.log ?? ((line: string) => console.warn(line));
   const maxPending = options.maxPendingFrames ?? DEFAULT_MAX_PENDING;
   const flushTimeoutMs = options.flushTimeoutMs ?? FLUSH_TIMEOUT_MS;
+
+  // ── provider 选择（浏览器端协议不变：还是同一套 SttClientMessage）──
+  // 配了 DASHSCOPE_API_KEY 就走阿里百炼 fun-asr；否则回退 Deepgram 老逻辑。
+  // 为什么不放浏览器选：key 一旦进浏览器就等于泄漏，必须服务端代理（见文件头）。
+  if (options.dashscope) {
+    return createAliSttBridge({
+      apiKey: options.dashscope.apiKey,
+      wsUrl: options.dashscope.wsUrl,
+      model: options.dashscope.model,
+      connect: options.connect,
+      sink: options.sink,
+      lang: options.lang,
+      format: options.format,
+      log,
+      encoder: options.encoder,
+    });
+  }
+  const dgConfig = options.config;
+  if (!dgConfig) {
+    // 两个 provider 都没配：这是「未配置」态（门禁 normally 会先挡掉）。
+    // 这里仍然给客户端一条明确的 error，而不是建一条永远不动的连接。
+    try {
+      options.sink.sendText(JSON.stringify({ type: "error", reason: "not-configured" }));
+      options.sink.close(1011, "not configured");
+    } catch {
+      /* 浏览器侧可能已经关了 */
+    }
+    log("[stt] no provider configured");
+    return {
+      pushAudio() {},
+      finishUtterance() {},
+      clientClosed() {},
+      get closed() {
+        return true;
+      },
+      get lastUpstreamType() {
+        return null;
+      },
+    };
+  }
+
+  // 能力上报（WS 建连后的第一条消息）：Deepgram 会发 speech_started →
+  // 客户端可以拿它做「用户开口」的打断触发源。阿里那条走 aliStt.ts（supportsSpeechStarted:false）。
+  try {
+    options.sink.sendText(
+      JSON.stringify({ type: "capabilities", provider: "deepgram", supportsSpeechStarted: true }),
+    );
+  } catch {
+    /* 浏览器侧可能已经关了 */
+  }
 
   /** connecting：握手没回来｜live：正常转发｜draining：已发 CloseStream，等尾段｜null：没有上游 */
   let phase: "connecting" | "live" | "draining" | null = null;
@@ -365,7 +433,7 @@ export function createSttBridge(options: SttBridgeOptions): SttBridge {
     try {
       created = options.connect(sttUpstreamUrl({ lang: options.lang, format: options.format }), {
         // key 只出现在这里：不写日志、不进 URL、不回响应
-        Authorization: `Token ${options.config.apiKey}`,
+        Authorization: `Token ${dgConfig.apiKey}`,
       });
     } catch {
       options.sink.sendText(JSON.stringify({ type: "error", reason: "upstream-unavailable" }));

@@ -13,17 +13,30 @@ export interface VoiceStatus {
   sttModel: string;
   /** 本地 `edge-tts` CLI 是否可用（中文合成；服务端启动时探测一次） */
   ttsZh: boolean;
+  /**
+   * 上游**会不会**发 `speech_started`（默认 true = 会发）。
+   *
+   * 阿里百炼 fun-asr 是整段识别，**不发**它 → 客户端不能拿它做「用户开口」的
+   * 打断触发源，必须改走 energy VAD（服务端不伪造 speech_started）。
+   */
+  supportsSpeechStarted: boolean;
+  /** 实际在用的 STT provider（`ali` / `deepgram` / `none`） */
+  sttProvider: "ali" | "deepgram" | "none";
 }
 
 export function parseVoiceStatus(raw: unknown): VoiceStatus | null {
   if (!raw || typeof raw !== "object") return null;
   const record = raw as Record<string, unknown>;
+  const provider = record.sttProvider;
   return {
     stt: record.stt === true,
     tts: record.tts === true,
     sttModel: typeof record.sttModel === "string" ? record.sttModel : "nova-2",
     // 老服务端没有这个字段 → false → 中文回退浏览器（保守但永远可用）
     ttsZh: record.ttsZh === true,
+    // 老服务端没有这个字段 → true（按「会发」处理，与改造前行为一致）
+    supportsSpeechStarted: record.supportsSpeechStarted !== false,
+    sttProvider: provider === "ali" || provider === "deepgram" ? provider : "none",
   };
 }
 

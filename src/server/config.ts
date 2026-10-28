@@ -72,6 +72,11 @@ export const LLM_DEFAULTS = {
   },
 } as const;
 
+import { ALI_ASR_MODEL, ALI_ASR_WS_URL } from "./aliStt.ts";
+
+export const DEFAULT_ALI_ASR_WS_URL = ALI_ASR_WS_URL;
+export const DEFAULT_ALI_ASR_MODEL = ALI_ASR_MODEL;
+
 /**
  * Deepgram 语音凭据（STT + TTS 共用同一个 key）。
  * null = 没配 key，语音通道整体不可用 —— 这是**正常状态**（纯文字对话仍然完整可跑），
@@ -79,6 +84,21 @@ export const LLM_DEFAULTS = {
  */
 export interface DeepgramConfig {
   apiKey: string;
+}
+
+/**
+ * 阿里百炼（DashScope）凭据 —— 语音识别的**第二**条通道。
+ *
+ * 为什么要第二条：Deepgram 的 key 一旦被吊销，浏览器端就彻底没有语音输入了。
+ * 配了 DASHSCOPE_API_KEY 就优先走阿里（服务端代理，浏览器协议不变）。
+ * null = 没配 → 回退 Deepgram 老逻辑。
+ */
+export interface DashscopeConfig {
+  apiKey: string;
+  /** 上游 WS 地址（可用 ALI_ASR_WS_URL 覆盖，主要给本地 mock / 自建网关用） */
+  wsUrl: string;
+  /** 模型名（可用 ALI_ASR_MODEL 覆盖） */
+  model: string;
 }
 
 /**
@@ -106,6 +126,8 @@ export interface ServerConfig {
   isProd: boolean;
   /** 语音凭据；null = 未配置（语音通道关闭，文字通道不受影响） */
   deepgram: DeepgramConfig | null;
+  /** 阿里百炼语音识别凭据；null = 未配置（配了就优先走它） */
+  dashscope: DashscopeConfig | null;
   /** 中文语音合成（Edge CLI）配置；无凭据，恒有值 */
   edgeTts: EdgeTtsConfig;
   /**
@@ -179,6 +201,22 @@ export function resolveDeepgramConfig(
   return apiKey ? { apiKey } : null;
 }
 
+/**
+ * 读 DASHSCOPE_API_KEY（阿里百炼）。缺了就返回 null（未配置，正常状态）。
+ * WS 地址与模型名可用环境变量覆盖（本地 mock / 自建网关 / 换模型时用）。
+ */
+export function resolveDashscopeConfig(
+  env: Record<string, string | undefined>,
+): DashscopeConfig | null {
+  const apiKey = trimToNull(env.DASHSCOPE_API_KEY);
+  if (!apiKey) return null;
+  return {
+    apiKey,
+    wsUrl: trimToNull(env.ALI_ASR_WS_URL) ?? DEFAULT_ALI_ASR_WS_URL,
+    model: trimToNull(env.ALI_ASR_MODEL) ?? DEFAULT_ALI_ASR_MODEL,
+  };
+}
+
 function toPort(raw: string | undefined): number {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 65535) return DEFAULT_PORT;
@@ -227,6 +265,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     port: toPort(env.SERVER_PORT),
     isProd: (env.NODE_ENV ?? "development").trim() === "production",
     deepgram: resolveDeepgramConfig(env),
+    dashscope: resolveDashscopeConfig(env),
     edgeTts: resolveEdgeTtsConfig(env),
     directorEnvMode,
     directorMode: defaults.mode,

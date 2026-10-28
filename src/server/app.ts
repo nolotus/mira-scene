@@ -48,6 +48,18 @@ export interface VoiceStatus {
   sttModel: string;
   ttsZh: boolean;
   /**
+   * 实际在用的 STT provider：`ali` = 阿里百炼 fun-asr，`deepgram` = 老通道。
+   * 客户端据此知道「这条通道的行为差异」（整段识别 vs 流式）。
+   */
+  sttProvider?: "ali" | "deepgram" | "none";
+  /**
+   * 上游**会不会**发 `speech_started`。
+   *
+   * 阿里百炼整段识别**不发**它 → 客户端不能拿它做「用户开口」的打断触发源，
+   * 必须改走 energy VAD（服务端**不伪造** speech_started：伪造比没有更糟）。
+   */
+  supportsSpeechStarted?: boolean;
+  /**
    * 原生快路径的状态（诊断区用）：`enabled=false` 时 `offReason` 说明为什么
    * （`mode-cli` / `timeout` / `auth` / `request-failed` …），`lastDrop` 是最近一次弃连原因。
    * 没有这一路时该字段不出现 —— 旧客户端读到的 JSON 与改造前一致。
@@ -139,6 +151,9 @@ export function createApp(options: AppOptions = {}): App {
   // 语音：STT 与 TTS 共用同一个 Deepgram key。没配 key 时两者都「不可用」，
   // 但这是正常态 —— 文字通道与 Mock 导演完全不受影响。
   const deepgram = config.deepgram;
+  // 阿里百炼：Deepgram key 被吊销时的回退通道。配了就**优先**用它（服务端代理，
+  // 浏览器端协议不变，客户端感知不到换了供应商）。
+  const dashscope = config.dashscope;
   const edge =
     options.edge ??
     createEdgeTtsSynthesizer({
@@ -168,11 +183,16 @@ export function createApp(options: AppOptions = {}): App {
   const voiceStatus = (): VoiceStatus => {
     const native = tts.native ?? null;
     const base: VoiceStatus = {
-      stt: deepgram !== null,
+      // 任一 provider 配了，语音输入就可用
+      stt: deepgram !== null || dashscope !== null,
       tts: tts.configured,
-      sttModel: STT_MODEL,
+      // 报**实际在用**的那个模型（阿里优先）
+      sttModel: dashscope ? dashscope.model : STT_MODEL,
       // 中文可用 = CLI 探到了 或者 原生 WS 配了（两者任一都能出声）
       ttsZh: tts.routes?.chinese ?? edge.available,
+      // 能力上报：阿里整段识别**不发** speech_started → 客户端改走 energy VAD
+      sttProvider: dashscope ? "ali" : deepgram !== null ? "deepgram" : "none",
+      supportsSpeechStarted: dashscope ? false : true,
     };
     // 没有原生那一路时**整个字段不出现**：旧客户端拿到的 JSON 与改造前逐字节一致
     return native
@@ -197,9 +217,11 @@ export function createApp(options: AppOptions = {}): App {
     });
 
   const openSttStream: App["openSttStream"] = (sink, opts) => {
-    if (!deepgram) return null;
+    // 两个 provider 都没配 → 没有语音输入（门禁会先回 503）
+    if (!deepgram && !dashscope) return null;
     return createSttBridge({
       config: deepgram,
+      dashscope,
       connect: sttConnect,
       sink,
       lang: opts?.lang,

@@ -59,7 +59,8 @@ try {
     fetch(request, srv) {
       const url = new URL(request.url);
       if (url.pathname === "/api/stt") {
-        // 没配 Deepgram：**明确 503 + reason**，不是静默失败也不是 101 之后的空连接
+        // 语音识别一个 provider 都没配（Deepgram 与百炼都没 key）：**明确 503 + reason**，
+        // 不是静默失败也不是 101 之后的空连接
         const gate = sttUpgradeGate(app.voice);
         if (gate) return gate;
         const lang: SttUpgradeData["lang"] = url.searchParams.get("lang") === "en-US" ? "en-US" : "zh-CN";
