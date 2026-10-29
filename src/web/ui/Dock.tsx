@@ -542,6 +542,9 @@ interface PushToTalkProps {
  */
 function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
   const holdingRef = useRef(false);
+  const startedAtRef = useRef(0);
+  /** 按下期间用于视觉反馈：没有它用户不知道到底开没开始录 */
+  const [holding, setHolding] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -556,6 +559,8 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
     event.preventDefault();
     if (holdingRef.current) return;
     holdingRef.current = true;
+    startedAtRef.current = Date.now();
+    setHolding(true);
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -567,6 +572,7 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
   const end = () => {
     if (!holdingRef.current) return;
     holdingRef.current = false;
+    setHolding(false);
     onEnd();
   };
 
@@ -574,11 +580,24 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
     <button
       type="button"
       className="mira-btn mira-btn--ptt"
+      data-holding={holding ? "true" : "false"}
       onPointerDown={start}
       onPointerUp={end}
       onPointerCancel={end}
-      onPointerLeave={end}
       onContextMenu={(event) => event.preventDefault()}
+      onKeyDown={(event) => {
+        // 键盘可达：空格/回车按下即开始，抬起即结束（读屏与键盘用户此前只能看到按钮但按了没反应）
+        if ((event.key === " " || event.key === "Enter") && !event.repeat) {
+          event.preventDefault();
+          start(event as unknown as PointerEvent<HTMLButtonElement>);
+        }
+      }}
+      onKeyUp={(event) => {
+        if (event.key === " " || event.key === "Enter") {
+          event.preventDefault();
+          end();
+        }
+      }}
       aria-label="按住说话：按下即打断并进入倾听，松开结束"
       title="按住说话：按下即打断并进入倾听，松开结束"
     >

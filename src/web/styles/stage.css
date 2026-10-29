@@ -2103,3 +2103,16 @@
   18% { opacity: 0.85; }
   100% { transform: translateY(-46vh) scale(1.5); opacity: 0; }
 }
+
+/* 按住说话：按下期间必须看得出来「在录」（此前完全没有反馈，用户不知道有没有按住） */
+.mira-btn--ptt[data-holding="true"] {
+  background: #f2b45c;
+  color: #1a1208;
+  border-color: #f2b45c;
+  box-shadow: 0 0 0 3px rgba(242, 180, 92, 0.28);
+  transform: translateY(1px);
+}
+.mira-btn--ptt:focus-visible {
+  outline: 2px solid #f2b45c;
+  outline-offset: 2px;
+}
