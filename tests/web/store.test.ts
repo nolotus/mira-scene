@@ -154,6 +154,23 @@ describe("store：canInterrupt 必须包含「音频还在响」这条腿", () =
   });
 });
 
+describe("store：canInterrupt 是实时 getter（不是 emit 快照）", () => {
+  test("音频结束后不 emit，也能立刻读到 false", async () => {
+    const api = new FakeApi();
+    const tts = new FakeTts();
+    let playing = true;
+    const store = new SessionStore({ api, tts, audioMode: "stream", audioPlaying: () => playing });
+    await store.init();
+    expect(store.getSnapshot().canInterrupt).toBe(true);
+
+    playing = false; // 音频结束，但没有任何 emit 被触发
+    expect(store.getSnapshot().canInterrupt).toBe(false);
+
+    playing = true;
+    expect(store.getSnapshot().canInterrupt).toBe(true);
+  });
+});
+
 describe("store：audioPlaying 探针抛错不能把界面带崩", () => {
   test("探针抛错 → canInterrupt 退回状态机判据，且 getSnapshot 不抛", async () => {
     const api = new FakeApi();

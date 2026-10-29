@@ -721,13 +721,16 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                     d="M185.6,344.4 C174.4,325.2 164.8,304.4 160,285.2 C157.6,275.6 161.6,268.4 168,269.2 C174.4,270 177.6,276.4 179.2,283.6 C182.4,301.2 188.8,322 195.2,339.6 Z"
                     fill="url(#mx-sleeve)"
                   />
-                  {/* 袖口 */}
+                  {/* 袖口 + 掌 + 指：整体上移 14、左移 6 —— 头缩到 0.8× 后发夹随之上移，
+                      原来手停在旧位置会悬空约 20~30 单位（几何近似，未逐帧校） */}
+                  <g transform="translate(-6,-14)">
                   <path d="M158.4,285.2 C163.2,279.6 176,279.6 180.8,284.4 L179.2,292.4 C174.4,297.2 163.2,297.2 158.4,292.4 Z" fill="url(#mx-coat-dark)" opacity="0.9" />
                   {/* 手掌 + 手指朝发夹 */}
                   <path className="reach-hand" d="M165.6,282 C160,274 157.6,263.6 160.8,257.2 C164,250.8 170.4,250 173.6,256.4 C175.2,262 174.4,269.2 172.8,274 Z" fill="url(#mx-skin)" />
                   <path d="M161.6,258 C163.2,251.6 168,248.4 172,251.6" stroke="#c58a6d" strokeWidth="1.8" fill="none" opacity="0.7" />
                   <path d="M166.4,255.6 L170.4,246" stroke="#f5d6bd" strokeWidth="4.2" strokeLinecap="round" />
                   <path d="M172,257.2 L176.8,248.4" stroke="#f5d6bd" strokeWidth="4" strokeLinecap="round" />
+                  </g>
                 </g>
 
                 {/* 10. 思考：头顶飘散的光点 */}

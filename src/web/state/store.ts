@@ -424,6 +424,8 @@ export class SessionStore {
   }
 
   private buildView(): SessionView {
+    // 闭包捕获 store 的 this：对象字面量里的 getter 若直接用 this，会被当成 view 自身
+    const interruptible = () => needsBargeIn(this.machine) || this.audioIsPlaying();
     return {
       machine: this.machine,
       scene: this.machine.scene,
@@ -444,8 +446,11 @@ export class SessionStore {
       latency: this.latency,
       busy: this.machine.turnActive,
       // 与 onUserSpeech 同一条判据：Esc / 打断按钮与「按住说话」不能有两套标准。
-      // turn.end 之后状态已 idle、但缓冲音频还在响的窗口里，canInterrupt 必须仍为 true。
-      canInterrupt: needsBargeIn(this.machine) || this.audioIsPlaying(),
+      // 这里刻意用 getter 而不是快照：turn.end 之后状态已 idle、缓冲音频还在响的那段窗口里，
+      // 快照会「多保持 true 一会儿」（音频结束不触发 emit）；getter 每次读都现算，随取随准。
+      get canInterrupt() {
+        return interruptible();
+      },
       lastUserText: this.lastUserText,
       lastBargeIn: this.lastBargeIn,
       ttsName: this.deps.tts.name,
