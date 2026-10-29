@@ -232,6 +232,8 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
   let lang: SttLang = options.lang ?? "zh-CN";
   let disposed = false;
   let listening = false;
+  /** 本轮已经推给上游的音频帧数（断开日志里最有用的上下文） */
+  let sentFrames = 0;
   let wantListening = false;
   let socket: VoiceSocketLike | null = null;
   let socketReady = false;
@@ -339,6 +341,7 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
   }
 
   function closeSocket(reason: string): void {
+    if (socket) logSocketEvent("close", { by: "client", reason });
     const current = socket;
     socket = null;
     socketReady = false;
@@ -368,6 +371,22 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
         /* 忽略 */
       }
     }
+  }
+
+  /**
+   * WS 生命周期日志：手机端「偶尔断」没有这一层就只能瞎猜。
+   * 关连接的三要素（code / reason / 存活时长）+ 是否在听、已发多少帧，
+   * 一起写进 console 与 trace —— 断了以后从 `read-console` 就能看出是网络、
+   * 还是被反代/口令拦（1006 异常关闭 / 1008 策略 / 1000 正常）。
+   */
+  function logSocketEvent(stage: "open" | "close" | "error", extra: Record<string, unknown> = {}): void {
+    const detail = Object.entries(extra)
+      .map(([k, v]) => `${k}=${String(v)}`)
+      .join(" ");
+    const line = `[stt:ws] ${stage} listening=${listening} sentFrames=${sentFrames} ${detail}`.trim();
+    log(line);
+    if (stage !== "open") console.warn(line); // 断开必须能在浏览器 console 里看到
+    markTrace(`stt:ws-${stage}`, detail);
   }
 
   /** 从 Deepgram 侧整体退到 Web Speech（再不行退到纯文字）。每跳都留原因。 */
@@ -503,6 +522,7 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
     created.onopen = () => {
       if (socket !== created || disposed) return;
       socketReady = true;
+      logSocketEvent("open", { queued: preRoll.length });
       // 握手期间攒下的音频按序补发：这一段往往正是「用户开口」的那句
       const queued = preRoll.length;
       if (queued > 0) {
@@ -527,11 +547,17 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
       if (socket !== created) return;
       handleMessage(event?.data);
     };
-    created.onerror = () => {
+    created.onerror = (event?: unknown) => {
+      // ws 的 error 事件通常不带 code/reason（浏览器出于安全不暴露），
+      // 真正能区分的关闭码要看随后的 close 事件 —— 这里只记「发生了 error」
+      logSocketEvent("error", { detail: String((event as { message?: string })?.message ?? "ws-error") });
       if (socket !== created) return;
       switchToFallback("ws-error");
     };
-    created.onclose = () => {
+    created.onclose = (event?: unknown) => {
+      const close = event as { code?: number; reason?: string } | undefined;
+      // 1006 = 异常关闭（网络/被反代掐）；1008 = 策略拒绝（口令/鉴权）；1000 = 正常
+      logSocketEvent("close", { code: close?.code ?? "n/a", reason: close?.reason || "n/a" });
       if (socket !== created) return;
       socketReady = false;
       if (disposed) return;

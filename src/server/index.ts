@@ -47,6 +47,7 @@ const edgeWs = createEdgeWsClient({
 const app = createApp({ config, edge, edgeWs });
 
 /** ws → 它那条上游桥。close 时必须 delete，否则一次说话漏一条上游连接。 */
+const openedAtByWs = new WeakMap<object, number>();
 const bridges = new Map<unknown, SttBridge>();
 
 type SttUpgradeData = { lang: "zh-CN" | "en-US" };
@@ -86,6 +87,10 @@ try {
     websocket: {
       open(ws) {
         const data = (ws as unknown as { data: SttUpgradeData }).data;
+        // 手机端「偶尔断」需要服务端这条时间线：连上/断开各一行，带帧数与存活秒数
+        const openedAt = Date.now();
+        openedAtByWs.set(ws, openedAt);
+        console.log(`[stt:ws] browser-open lang=${data?.lang ?? "zh-CN"}`);
         const bridge = app.openSttStream(
           {
             sendText: (payload) => ws.send(payload),
@@ -118,6 +123,10 @@ try {
         bridge.pushAudio(new Uint8Array(message));
       },
       close(ws) {
+        const openedAt = openedAtByWs.get(ws);
+        openedAtByWs.delete(ws);
+        const lived = openedAt ? ((Date.now() - openedAt) / 1000).toFixed(1) : "?";
+        console.log(`[stt:ws] browser-close lived=${lived}s`);
         // 浏览器彻底断开（关 WS / 页面卸载）：先让上游 flush 尾段，再两侧收摊。
         // 不做这件事，上游会一直等音频直到超时（白烧配额）；硬断则会吞掉最后一条 final。
         bridges.get(ws)?.clientClosed();
