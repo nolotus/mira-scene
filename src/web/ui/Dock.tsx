@@ -87,6 +87,11 @@ export function splitDockChips(list: readonly DockChip[], max = 2): { visible: D
 
 export interface DockVisibilityInput {
   characterStatus: CharacterStatus;
+  /**
+   * 状态机 + 音频双重判据给出的「现在能不能打断」（来自 SessionView.canInterrupt）。
+   * 缺省时退回「角色状态是 speaking」的旧口径，保持对旧调用方兼容。
+   */
+  canInterrupt?: boolean;
   /** 麦克风不可用的根因；null = 语音路径正常 */
   micNotice: MicNotice | null;
   speechSupported: boolean;
@@ -120,7 +125,9 @@ export function visibleDockControls(input: DockVisibilityInput): DockVisibility 
   const kind = input.micNotice?.kind ?? null;
   const hardBlocked = kind === "insecure" || kind === "unsupported" || kind === "stt";
   return {
-    interrupt: input.characterStatus === "speaking",
+    // 用 canInterrupt 而不是 characterStatus：TTS 流式播放时 turn.end 已把状态打回 idle，
+    // 但音频还在响，这时按钮不该消失（否则「按钮能打断/不能打断」随状态漂移）
+    interrupt: input.canInterrupt ?? input.characterStatus === "speaking",
     mic: !hardBlocked,
     voiceHint: hardBlocked,
     ptt: !hardBlocked,
@@ -221,6 +228,7 @@ export function Dock(props: DockProps) {
     micNotice: props.micNotice,
     speechSupported: props.diagnostics.speechSupported,
     hasError,
+    canInterrupt: view.canInterrupt,
   });
 
   const chips = useMemo(

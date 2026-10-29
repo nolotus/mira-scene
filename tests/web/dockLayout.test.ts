@@ -32,6 +32,14 @@ describe("visibleDockControls · 打断只在说话时出现", () => {
     }
   });
 
+  test("canInterrupt 为真时，即便状态已回 idle 也出现（缓冲音频仍在播的窗口）", () => {
+    expect(visibleDockControls({ ...base, characterStatus: "idle", canInterrupt: true }).interrupt).toBe(true);
+  });
+
+  test("canInterrupt 为假时，即便状态是 speaking 也不出现（判据唯一来源）", () => {
+    expect(visibleDockControls({ ...base, characterStatus: "speaking", canInterrupt: false }).interrupt).toBe(false);
+  });
+
   test("speaking 才出现", () => {
     expect(visibleDockControls({ ...base, characterStatus: "speaking" }).interrupt).toBe(true);
   });

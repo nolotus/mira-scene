@@ -71,6 +71,90 @@ class FakeApi implements SessionApi {
 
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
+describe("store：打断判据要看「音频是否真的在响」", () => {
+  test("turn.end 之后状态已 idle、但音频还在播：按住说话仍必须打断并 cancel", async () => {
+    const api = new FakeApi();
+    const tts = new FakeTts();
+    let audioPlaying = true;
+    const store = new SessionStore({
+      api,
+      tts,
+      audioMode: "stream",
+      audioPlaying: () => audioPlaying,
+    });
+    await store.init();
+
+    void store.submit("今晚还开门吗？");
+    await flush();
+    const request = api.requests[0]!;
+    api.emit({ type: "turn.start", turnId: request.turnId, epoch: request.epoch, at: 0 });
+    api.emit({ type: "text.delta", turnId: request.turnId, epoch: request.epoch, text: "开着。" });
+    api.emit({ type: "turn.end", turnId: request.turnId, epoch: request.epoch, interrupted: false });
+    await flush();
+
+    const cancelsBefore = tts.cancels;
+    // 状态机此刻可能已是 idle（turn.end），但音频仍在缓冲播放
+    store.onUserSpeech("button");
+    await flush();
+
+    expect(tts.cancels).toBeGreaterThan(cancelsBefore);
+    expect(store.getSnapshot().scene.characterStatus).toBe("listening");
+  });
+
+  test("既不在说、也没音频：不打断，只切倾听（不误伤）", async () => {
+    const api = new FakeApi();
+    const tts = new FakeTts();
+    const store = new SessionStore({
+      api,
+      tts,
+      audioMode: "stream",
+      audioPlaying: () => false,
+    });
+    await store.init();
+    const cancelsBefore = tts.cancels;
+    store.onUserSpeech("button");
+    await flush();
+    expect(tts.cancels).toBe(cancelsBefore);
+    expect(store.getSnapshot().scene.characterStatus).toBe("listening");
+  });
+});
+
+describe("store：canInterrupt 必须包含「音频还在响」这条腿", () => {
+  test("turn.end 之后 idle + 音频仍在播 → view.canInterrupt 仍为 true", async () => {
+    const api = new FakeApi();
+    const tts = new FakeTts();
+    let audioPlaying = true;
+    const store = new SessionStore({
+      api,
+      tts,
+      audioMode: "stream",
+      audioPlaying: () => audioPlaying,
+    });
+    await store.init();
+
+    void store.submit("今晚还开门吗？");
+    await flush();
+    const request = api.requests[0]!;
+    api.emit({ type: "turn.start", turnId: request.turnId, epoch: request.epoch, at: 0 });
+    api.emit({ type: "text.delta", turnId: request.turnId, epoch: request.epoch, text: "开着。" });
+    api.emit({ type: "turn.end", turnId: request.turnId, epoch: request.epoch, interrupted: false });
+    await flush();
+
+    const view = store.getSnapshot();
+    // 前提：状态机确实已经判不出可打断（否则这条测试测不到「第二条腿」）
+    expect(view.scene.characterStatus).not.toBe("speaking");
+    expect(view.canInterrupt).toBe(true);
+
+    audioPlaying = false;
+    // canInterrupt 是 emit 时的快照：音频结束本身不触发 emit（已知限制，见审查意见），
+    // 这里用一次麦克风状态切换逼出 emit，验证快照会跟着 audioPlaying 回落
+    store.setMic("listening");
+    store.setMic("idle");
+    await flush();
+    expect(store.getSnapshot().canInterrupt).toBe(false);
+  });
+});
+
 describe("store：垫音（filler）的让位时机", () => {
   function spyFiller() {
     const calls = { play: 0, stop: 0 };

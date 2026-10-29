@@ -209,6 +209,14 @@ export interface SessionView {
 export interface SessionStoreDeps {
   api: SessionApi;
   /**
+   * 「音频现在还在响吗」探针（可选）。接 presence 的 mouthDrive。
+   *
+   * 为什么打断判据不能只看状态机：TTS 是流式播放，`turn.end` 之后状态已回 idle，
+   * 但缓冲里的音频还在响。此时用户按「按住说话」，只看 `characterStatus === "speaking"`
+   * 会判成「没在说话」→ 不 cancel → 听起来就是「没打断，她继续说」。
+   */
+  audioPlaying?: () => boolean;
+  /**
    * 垫音（可选）：发送那一刻先出一声「嗯」，填掉等模型首字的空白。
    * 真实语音一到（首个 text.delta / audio.chunk）必须立刻 stop，绝不与 TTS 叠音。
    */
@@ -441,7 +449,9 @@ export class SessionStore {
       turns: this.turns,
       latency: this.latency,
       busy: this.machine.turnActive,
-      canInterrupt: needsBargeIn(this.machine),
+      // 与 onUserSpeech 同一条判据：Esc / 打断按钮与「按住说话」不能有两套标准。
+      // turn.end 之后状态已 idle、但缓冲音频还在响的窗口里，canInterrupt 必须仍为 true。
+      canInterrupt: needsBargeIn(this.machine) || this.deps.audioPlaying?.() === true,
       lastUserText: this.lastUserText,
       lastBargeIn: this.lastBargeIn,
       ttsName: this.deps.tts.name,
@@ -747,7 +757,9 @@ export class SessionStore {
 
   /** VAD / 麦克风检测到用户开口 */
   onUserSpeech(reason: BargeInReason = "speech"): void {
-    if (needsBargeIn(this.machine)) {
+    // 状态机说「在说」或者**音频确实还在响**都算可打断：后者覆盖 turn.end 之后
+    // 缓冲仍在播完的窗口（真机上最容易「按了没反应」的那一段）
+    if (needsBargeIn(this.machine) || this.deps.audioPlaying?.() === true) {
       this.interrupt(reason);
       return;
     }
