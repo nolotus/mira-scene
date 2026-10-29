@@ -298,7 +298,7 @@ export class LiveDirector implements Director {
       if (signal.aborted) return;
 
       // ---- 收尾：补完台词 → 再补在后面才扫到的 cues ----
-      const payload = parseDirectorPayload(rawAll);
+      const payload = parseDirectorPayload(rawAll) ?? salvageSay(rawAll);
       const remainder = remainderOf(payload, emitted) || pending;
 
       for (const piece of chunkText(remainder)) {
@@ -551,6 +551,23 @@ export function splitReady(text: string): { pieces: string[]; rest: string } {
  *   旧：{"say":"...","directives":[{...}]}  →  每条转成 atChar=0 的 cue（立即执行）
  * 非法的 atChar / 指令逐条丢弃并计数，say 保留 —— 一条脏数据不该毁掉整轮。
  */
+/**
+ * 抢救台词：模型偶尔吐出被截断/夹了散文的 JSON，整轮直接报错太粗暴。
+ * 这里从原文里捞出 `"say":"…"` 的完整部分（遇到未转义的结尾引号就停），
+ * 返回不含 cues 的 payload —— 用户听到的是「这轮没有动作，但有台词」，
+ * 而不是「出错了：上游返回的内容无法解析为 JSON」。
+ */
+export function salvageSay(raw: string): DirectorPayload | null {
+  const match = /"say"\s*:\s*"((?:[^"\\]|\\.)*)/.exec(raw);
+  if (!match) return null;
+  let body = match[1] ?? "";
+  // 截断在半个转义序列上时，回退到最后一个完整反斜杠之前
+  const trailing = /\\$/.test(body) ? body.slice(0, -1) : body;
+  const text = trailing.replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\").trim();
+  if (!text) return null;
+  return { say: text, cues: [], directives: [], dropped: { atChar: 0, directive: 0 } } as DirectorPayload;
+}
+
 export function parseDirectorPayload(raw: string): DirectorPayload | null {
   const cleaned = raw.replace(/```[a-zA-Z]*\n?/g, "").trim();
   const start = cleaned.indexOf("{");

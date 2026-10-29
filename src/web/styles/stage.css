@@ -2118,3 +2118,20 @@
   outline: 2px solid #f2b45c;
   outline-offset: 2px;
 }
+
+/* 室内场景不要把窗层放大到全屏 —— 切过 window_rain 之后这层若残留 scale(1.9)，
+   看起来就是「咖啡馆里下满屏雨」（owner 实测反馈「下雨出现在咖啡馆里」） */
+.stage-root[data-scene="cafe_night"] .sc-window,
+.stage-root[data-scene="cafe_closing"] .sc-window,
+.stage-root[data-scene="street_night"] .sc-window,
+.stage-root[data-scene="hotel_entrance"] .sc-window {
+  transform: none;
+  filter: none;
+}
+/* 雨线永远裁在自己容器内：任何一层被放大都不该把线条铺到整个舞台 */
+.rain-layer,
+.rain-sheet,
+.sea-glitter,
+.shore-wind {
+  overflow: hidden;
+}
