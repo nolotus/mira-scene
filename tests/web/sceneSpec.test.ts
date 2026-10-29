@@ -11,6 +11,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SceneVariant } from "../../src/shared/protocol";
 import {
+  CHAR_SCALE_CONTRACT,
   DEFAULT_SCENE_ID,
   RENDERABLE_PLANES,
   SCENE_SPECS,
@@ -336,5 +337,32 @@ describe("新场景：雨夜街道与酒店门廊", () => {
     const { validateDirective } = await import("../../src/server/scene/validate.ts");
     expect(validateDirective({ kind: "scene", scene: "street_night" })).not.toBeNull();
     expect(validateDirective({ kind: "scene", scene: "hotel_entrance" })).not.toBeNull();
+  });
+
+  test("门廊场景角色尺度与站位契约：脚踩台阶、头顶留出余量、占高落在合理区间", () => {
+    const box = charBoxOf(specOf("hotel_entrance"));
+    // 脚底落在门廊台阶上沿（.hotel-steps height: 8%）
+    expect(box.bottom).toBe("8%");
+    // 高度落在 16%–45% 建议区间
+    const heightPct = parseFloat(box.height);
+    expect(heightPct).toBeGreaterThanOrEqual(CHAR_SCALE_CONTRACT.MIN_HEIGHT_PCT);
+    expect(heightPct).toBeLessThanOrEqual(CHAR_SCALE_CONTRACT.MAX_OUTDOOR_HEIGHT_PCT);
+    expect(box.height).toBe("33.6%");
+    // 头顶留出充足余量（至少 10%）
+    const bottomPct = parseFloat(box.bottom);
+    const headroom = 100 - (bottomPct + heightPct);
+    expect(headroom).toBeGreaterThanOrEqual(CHAR_SCALE_CONTRACT.MIN_HEADROOM_PCT);
+    expect(headroom).toBeCloseTo(58.4, 1);
+  });
+
+  test("全场景角色尺度契约：各场景 charScale（或等效的 scale 参数）落在同一区间，不允许单个场景偏差超过阈值", () => {
+    for (const [id, spec] of Object.entries(SCENE_SPECS)) {
+      const box = charBoxOf(spec);
+      // 等效缩放倍率必须在 [0.5, 1.2] 区间内，没有场景允许单方面膨胀或坍缩
+      expect(box.scale).toBeGreaterThanOrEqual(CHAR_SCALE_CONTRACT.MIN_SCALE);
+      expect(box.scale).toBeLessThanOrEqual(CHAR_SCALE_CONTRACT.MAX_SCALE);
+      // 场景名称记录在断言上下文中
+      expect(id.length).toBeGreaterThan(0);
+    }
   });
 });

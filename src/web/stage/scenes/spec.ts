@@ -120,6 +120,12 @@ export interface CameraSpec {
   horizonY: number;
   /** 竖直视场角（度）。目前只作为数据：给「同一地平线、不同焦段」预留 */
   fovDeg: number;
+  /**
+   * 角色尺度倍率（可选，默认由 horizonY / REFERENCE_HORIZON_Y 推导）。
+   * 当场景需要让角色站在特定地平线（如门廊台阶 horizonY: 0.08）但又要维持
+   * 合理的人物占画面比例时，显式指定 charScale 避免角色被过度放大或缩小。
+   */
+  charScale?: number;
 }
 
 // ---------------------------------------------------------------- 动作
@@ -195,13 +201,33 @@ export interface CharBox {
 }
 
 export function charBoxOf(spec: SceneSpec): CharBox {
-  const scale = spec.camera.horizonY / REFERENCE_HORIZON_Y;
+  const scale =
+    spec.camera.charScale !== undefined
+      ? spec.camera.charScale
+      : spec.camera.horizonY / REFERENCE_HORIZON_Y;
   return {
     bottom: `${pct(spec.camera.horizonY)}%`,
     height: `${num(CHAR_HEIGHT_AT_REFERENCE * scale * 100)}%`,
     scale,
   };
 }
+
+/**
+ * 场景角色尺度的契约常量：
+ * 保证各场景的角色尺度落在合理区间，避免特定场景人物失真或糊满画面。
+ */
+export const CHAR_SCALE_CONTRACT = {
+  /** 允许的角色等效尺度倍率下限（相对于标定身高） */
+  MIN_SCALE: 0.5,
+  /** 允许的角色等效尺度倍率上限 */
+  MAX_SCALE: 1.2,
+  /** 角色占画面高度百分比下限（建议区间 16%–45%） */
+  MIN_HEIGHT_PCT: 16,
+  /** 门廊等室外站立场景角色高度百分比上限 */
+  MAX_OUTDOOR_HEIGHT_PCT: 45,
+  /** 角色头顶距画面顶部的最小余量百分比（至少 10%） */
+  MIN_HEADROOM_PCT: 10,
+} as const;
 
 // ---------------------------------------------------------------- 三个现有场景 + 一个示例场景
 
@@ -495,7 +521,11 @@ export const SCENE_SPECS: Record<SceneVariant, SceneSpec> = {
       rimStrength: 1.05,
       shadowSoftness: 0.66,
     },
-    camera: { horizonY: 0.3, fovDeg: 42 },
+    // 角色站位契约：门廊台阶在画面底端 0..8%（.hotel-steps height: 8%），
+    // 角色脚底落在台阶上沿（horizonY: 0.08），charScale 显式定为 0.6，
+    // 使角色高度为 33.6%（头顶落在 41.6%，正好处于雨棚 bottom: 40% 下方），
+    // 留出 58.4% 画面上方余量，与门、台阶、雨棚构成严密透视。
+    camera: { horizonY: 0.08, fovDeg: 42, charScale: 0.6 },
     particles: [
       { kind: "rain_far", count: 40, opacity: [0.22, 0.62] },
       { kind: "rain_near", count: 13, opacity: [0.05, 0.16] },
