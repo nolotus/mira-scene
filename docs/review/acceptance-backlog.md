@@ -63,3 +63,17 @@
 
 ### 优先顺序
 P1：正式录屏 / 真机双向语音与打断 / 软键盘可用性 → P2：视觉逐态与场景演出复验、窄屏、文档一致性和 flaky test → P3：桌面断点、live 演示完善。
+
+
+## 深入审查：事件预处理顺序（2026-10-29）
+
+### OPT-017 · P1 · 已确认静态逻辑缺陷候选：未验证 turnId 就预处理 cue 队列
+`src/web/state/store.ts` 的 `handleEvent` (约 1005–1030) 只在入口验证 `event.epoch`，但**在调用 `reduceEvent()` 校验 `turnId` / 活跃轮之前**，对 `turn.end` 执行 `flushCues({all:true})`，或对 `turn.start` 执行 `resetCues()`，对不可恢复的 `error` 执行 `discardCues()`。因此来自**同 epoch 但错误 turnId** 的事件，即使稍后被 reducer 拒绝，也可能清理或提前播放当前轮排队的场景指令。风险直接涉及 PDF #13/#15/#27。当前仅静态推导，尚未用测试重现，不声称线上已出现。
+**建议修复**：在执行所有带副作用的前置队列处理前，共用一致的 `epoch + turnId + turnActive` 校验；或调整处理顺序，先检查事件归属再改变队列。注意正常 `turn.start` 的合法例外，并保留 `turn.end` 完成前 flush 的既有语义。
+**建议回归测试**：在有效轮 A 有未来 atChar 队列的情况下，注入 epoch 相同、turnId=B 的 `turn.end` / `turn.start` / 非恢复 error，断言不改变 A 队列、不播放任何 cue，随后 A 合法 text.delta 能正常放行；也测试已收尾 turnId=null 的旧事件。对比新旧两种触发顺序。
+
+### OPT-018 · P2 · 校验字幕/音频对齐的实际语义
+`store.ts` 的 `text.delta` 同时更新完整字幕文本并把 delta 送入 TTS；浏览器/第三方 TTS 分句合成、预取和实际出声可能与“字幕同步”存在可见偏差。需要真实音频时间轴而不是仅凭同一事件驱动认定同步。给 06–09 增加字幕/首声延迟和连续句间同步测试。尚未确认为 Bug。
+
+### 这一轮更新说明
+优先修 OPT-017 的归属校验问题，再做真机录屏与输入/语音联动。仅更新审查文档，不改业务代码。
