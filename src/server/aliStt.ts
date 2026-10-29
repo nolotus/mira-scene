@@ -111,6 +111,46 @@ export const ALI_TOTAL_BUDGET_MS = 15_000;
 /** 等上游出终稿的上限（超时按错误处理，不让会话挂成僵尸） */
 export const ALI_RESULT_TIMEOUT_MS = 15_000;
 /**
+ * 判「这句是空的」所需的**静默**时长：task-finished 之后连续这么久没有任何 result，
+ * 才敢判定没识别出内容；任何一条 result 到来都会重置它。
+ *
+ * 为什么取到与 ALI_FINAL_GRACE_MAX_MS 一样大：判空的代价是**丢整句**（客户端既拿不到
+ * final 也拿不到 error，因此连回退浏览器识别都不会触发），而多等一会儿的代价只是延迟，
+ * 且最坏延迟已被 ALI_FINAL_GRACE_MAX_MS 兜住 —— 两者对齐后，静默窗内晚到的稿都还能救回来。
+ * 上游在 task-finished 之后仍有尾部 result 是实测存在的（晚到 400ms 量级已复现），
+ * 所以窗口不能贴着 150ms 宽限取值。
+ * 约束：必须 ≥ ALI_FINAL_GRACE_MAX_MS（有测试钉住），否则「宽限上限之后、静默窗之前」
+ * 那段晚到的文本仍会被判空丢掉。
+ */
+export const ALI_EMPTY_SETTLE_QUIET_MS = 1_500;
+/**
+ * 发稿宽限最多顺延到 task-finished 之后这么久。没有这个上限，一个不停出 result 的
+ * 上游能把 final 无限推迟（每次都重置宽限）；有上限则最多晚这么久，到点就把已有
+ * 文本发出去（没有文本按空结果收尾）。
+ *
+ * 取值必须留在**客户端契约**内：`src/web/voice/deepgramStt.ts` 写明服务端冲尾段
+ * final ≤1500ms，所以这里与 ALI_EMPTY_SETTLE_QUIET_MS 都压在 1500 以内。
+ */
+export const ALI_FINAL_GRACE_MAX_MS = 1_200;
+/**
+ * task-finished 之后等「安静」多久才发终稿（ms）。上游最后一条 result 会跟在
+ * task-finished 后面，实测晚到 400ms 量级 —— 取 800 是给它留 p99 余量
+ * （400ms 只是一次采样；丢尾巴是永久丢字，多等几百毫秒只是延迟）。
+ * 只有「上游没发 sentence_end」的那条路径会走这个宽限（正常句子的 final 由
+ * sentence_end + finish_utterance 直接触发），所以它主要花在本来就要多等的场景上。
+ */
+export const ALI_FINAL_GRACE_MS = 800;
+/** 终稿是**因为什么**发出去的（只用于日志，不参与逻辑） */
+export type FinalTrigger =
+  | "sentence_end"
+  | "finalize_check"
+  | "grace"
+  | "grace_max"
+  | "empty_flush"
+  | "upstream_closed"
+  | "timeout"
+  | "unknown";
+/**
  * 等握手 + task-started 的上限（从**连接创建**起算，因此**覆盖预热阶段**）。
  * 与总预算同值：预热不是「免费」的，它花的就是客户端的等待时间。
  */
@@ -506,6 +546,12 @@ export interface AliSttOptions {
   maxUtteranceMs?: number;
   /** 等终稿上限（ms） */
   resultTimeoutMs?: number;
+  /** 「这句是空的」判定所需的静默时长（ms）；测试注入小值以免真等 3 秒 */
+  emptySettleQuietMs?: number;
+  /** 发稿宽限的绝对上限（ms）；测试注入小值以免真等 3 秒 */
+  finalGraceMaxMs?: number;
+  /** task-finished 之后等安静多久才发终稿（ms）；测试注入小值 */
+  finalGraceMs?: number;
   /** 单句帧数上限 */
   maxFrames?: number;
   /** 转码输出上限（字节） */
@@ -1404,6 +1450,12 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
   const maxFrames = options.maxFrames ?? ALI_MAX_FRAMES;
   const maxPcmBytes = options.maxPcmBytes ?? ALI_MAX_WAV_BYTES;
   const maxSessions = options.maxSessions ?? ALI_MAX_SESSIONS;
+  /** task-finished 的时刻（0 = 还没收到） */
+  let taskFinishedAtMs = 0;
+  /** 静默窗 / 宽限上限的实际取值（测试注入小值，免得每条用例真等 3 秒） */
+  const emptySettleQuietMs = options.emptySettleQuietMs ?? ALI_EMPTY_SETTLE_QUIET_MS;
+  const finalGraceMaxMs = options.finalGraceMaxMs ?? ALI_FINAL_GRACE_MAX_MS;
+  const finalGraceMs = options.finalGraceMs ?? ALI_FINAL_GRACE_MS;
 
   let closed = false;
   /** 收尾态：客户端已经走了 → 不再新建上游连接 */
@@ -1450,6 +1502,17 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
   let finalizeTimer: ReturnType<typeof setTimeout> | null = null;
   /** task-finished 之后给终稿留的宽限（最后一条 result 可能跟在后面） */
   let finalGraceTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * 空结果的「静默期」计时器：只有在**这么久没有任何 result**之后，才敢判定这句是空的。
+   * 不能一看到 task-finished 就判空 —— 上游最后一条 result 可能晚于宽限才到
+   * （那正是旧实现靠 waitFinal 兜住、而「立刻判空」会把整句丢掉的窗口）。
+   * 每收到一条 result 就重置。
+   */
+  let emptySettleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 已经按「空结果」安静收尾过了（防止下一句再进 waitFinal 干等） */
+  let emptySettled = false;
+  /** 已发给客户端的终稿文本（用来发现「final 之后还有更长的尾巴」） */
+  let finalTextSent = "";
   /** 等 final 的等待者 */
   let finalWaiter: (() => void) | null = null;
   /** 收尾是否已经在跑 */
@@ -1500,6 +1563,7 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
     resultTimer = clearTimer(resultTimer);
     finalizeTimer = clearTimer(finalizeTimer);
     finalGraceTimer = clearTimer(finalGraceTimer);
+    emptySettleTimer = clearTimer(emptySettleTimer);
     pendingPcm.length = 0;
     // 进程纪律：收摊时 ffmpeg 必须死
     killEncoder();
@@ -1521,18 +1585,119 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
     );
   };
 
-  /** 发 final（一句只发一次） */
-  const emitFinal = (): void => {
+  /**
+   * 发 final（一句只发一次）。
+   *
+   * `trigger` 只用于观测：线上「尾巴是不是被丢了」必须能从日志回答，
+   * 否则这套宽限/静默窗的调参永远是猜的。`sinceTaskFinished` 是相对 task-finished
+   * 的偏移（没收到 task-finished 时为 -1），长度只记字符数、不记内容。
+   */
+  const emitFinal = (trigger: FinalTrigger = "unknown"): void => {
     if (finalSent || closed) return;
     const text = `${completedText}${currentText}`.trim();
     if (!text) return;
     finalSent = true;
+    finalTextSent = text;
+    log(
+      `[stt:ali:stream] final sent trigger=${trigger} sinceTaskFinished=${
+        taskFinishedAtMs > 0 ? Date.now() - taskFinishedAtMs : -1
+      }ms len=${text.length}`,
+    );
     sinkSend({ type: "final", text });
+    // 终稿已经定下来，等待用的定时器必须**当场**清掉 —— 线上 7 次「15 秒空等」的根因：
+    // final 已经发给浏览器了，resultTimer 却还挂着，15 秒后它照样触发 → 冒一条
+    // result-timeout 并把整条会话 shutdown（日志 reason=result timeout lastEvent=result）；
+    // 更糟的是 user 接着说下一句时，这句的旧定时器会炸在下一句身上。
+    resultTimer = clearTimer(resultTimer);
+    finalGraceTimer = clearTimer(finalGraceTimer);
+    emptySettleTimer = clearTimer(emptySettleTimer);
     if (finalWaiter) {
       const waiter = finalWaiter;
       finalWaiter = null;
       waiter();
     }
+  };
+
+  /**
+   * 「上游明确说这段结束了，却一个字都没识别出来」→ 把这句**安静**收尾。
+   *
+   * 为什么不能沿用超时兜底：`resultTimeoutMs` 是 15s，用户说完话要干等 15s，
+   * 到点还会发 `result-timeout` 并 `shutdown` 整条会话 —— 而客户端收到**任何**
+   * error 都会 `switchToFallback` 切到浏览器识别通道（`deepgramStt.ts` 的 error 分支），
+   * 一句没声音就把整条通道降级掉，代价远大于「这句什么都没有」。
+   * 空的就一定结束（不能因为清了定时器而挂死）：这里主动唤醒 waiter，
+   * `finishOnce` 随后照常 `endUtterance()`（杀 ffmpeg、为下一句预热）。
+   */
+  const finishEmptyUtterance = (): void => {
+    if (closed || finalSent) return;
+    if (`${completedText}${currentText}`.trim()) {
+      // 已经有文本却没发稿 = 静默丢句。这里补发，绝不静默丢弃。
+      emitFinal("empty_flush");
+      return;
+    }
+    emptySettled = true;
+    resultTimer = clearTimer(resultTimer);
+    finalGraceTimer = clearTimer(finalGraceTimer);
+    emptySettleTimer = clearTimer(emptySettleTimer);
+    // 有日志才能在线上区分「用户没说话」与「服务端把真句吞了」——
+    // 两者在客户端完全同形（都是没有任何消息）。
+    log("[stt:ali:stream] empty result: settle without final");
+    if (finalWaiter) {
+      const waiter = finalWaiter;
+      finalWaiter = null;
+      waiter();
+    }
+  };
+
+  /**
+   * task-finished 之后：先留宽限再发终稿（最后一条 result 可能紧跟其后）。
+   *
+   * 每次都**按剩余预算裁剪**等待时长：只在装弹时检查 elapsed 是不够的 ——
+   * 定时器回调不会再复查，于是「尾部 result 恰好在截止前到达」会把最终偏移
+   * 推到 `finalGraceMaxMs + finalGraceMs`，直接顶破客户端契约（服务端冲尾段
+   * final ≤1500ms，见 `src/web/voice/deepgramStt.ts`）。裁剪后最坏偏移
+   * 恒等于 `finalGraceMaxMs`。
+   */
+  const armFinalGrace = (): void => {
+    finalGraceTimer = clearTimer(finalGraceTimer);
+    const elapsed = taskFinishedAtMs > 0 ? Date.now() - taskFinishedAtMs : 0;
+    if (taskFinishedAtMs > 0 && elapsed >= finalGraceMaxMs) {
+      emitFinal("grace_max");
+      finishEmptyUtterance();
+      return;
+    }
+    const budget = taskFinishedAtMs > 0 ? finalGraceMaxMs - elapsed : finalGraceMs;
+    const waitMs = Math.max(0, Math.min(finalGraceMs, budget));
+    finalGraceTimer = setTimeout(() => {
+      finalGraceTimer = null;
+      // 到点复查：裁剪后正常不会命中，留着是为了「预算被别处拖长」时也不会绕过上限
+      if (taskFinishedAtMs > 0 && Date.now() - taskFinishedAtMs >= finalGraceMaxMs) {
+        emitFinal("grace_max");
+        finishEmptyUtterance();
+        return;
+      }
+      emitFinal("grace");
+    }, waitMs);
+  };
+
+  /**
+   * 空结果的静默期：**每收到一条 result 都重置**。
+   * 只有 task-finished 之后连续 EMPTY_SETTLE_QUIET_MS 没有任何 result，
+   * 才判定这句是空的（见 finishEmptyUtterance）。
+   */
+  const armEmptySettle = (): void => {
+    emptySettleTimer = clearTimer(emptySettleTimer);
+    // 与发稿宽限同样按「距 task-finished 的剩余预算」裁剪：这个计时器会被每条
+    // result 重置，若按「最后一条 result + 全窗」算，一个持续吐空 result 的上游
+    // 能把「既无 final 也无 error」拖到 宽限上限 + 静默窗。裁到 task-finished
+    // 之后 ≤ emptySettleQuietMs，客户端最坏等待就有界。
+    const elapsed = taskFinishedAtMs > 0 ? Date.now() - taskFinishedAtMs : 0;
+    const budget =
+      taskFinishedAtMs > 0 ? emptySettleQuietMs - elapsed : emptySettleQuietMs;
+    emptySettleTimer = setTimeout(() => {
+      emptySettleTimer = null;
+      finishEmptyUtterance();
+    }, Math.max(0, Math.min(emptySettleQuietMs, budget)));
   };
 
   /**
@@ -1553,12 +1718,35 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
       currentText = text;
     }
     const shown = `${completedText}${currentText}`;
-    if (shown && shown !== lastInterim) {
+    // 终稿已经发过、上游却又给了更长的累计文本：这段尾巴进不了 final（客户端不接受
+    // 同一句的第二条 final），也进不了 interim（见下）。至少让它可观测，
+    // 否则线上丢尾巴时既没有症状也没有证据。
+    if (finalSent && shown.length > finalTextSent.length) {
+      log(
+        `[stt:ali:stream] result after final dropped extra=${shown.length - finalTextSent.length}`,
+      );
+    }
+    // 终稿已经发过就不再推 interim：否则「上限到点发出的截断稿」之后还会冒更长的
+    // interim，浏览器上看到的字比提交出去的终稿多（复审实测 final:今晚雨 → interim:今晚雨一直没停）
+    if (shown && shown !== lastInterim && !finalSent) {
       lastInterim = shown;
       sinkSend({ type: "interim", text: shown });
     }
     // 客户端已经说了「这句说完了」→ 这一句的 final 现在就能给
-    if (sentenceEnd && finishRequested) emitFinal();
+    if (sentenceEnd && finishRequested) emitFinal("sentence_end");
+    // task-finished 之后还在出 result ⇒ 上游还在吐收尾内容：
+    // 两个窗口都要重置。只重置静默窗是不够的 —— 宽限早已被消费掉，
+    // 这条 result 的文本就再也没有机会被发出去（干等 15s 后既发 final 又报超时）。
+    if (taskFinished && !finalSent) {
+      // 这条是宽限/静默窗的**调参数据**：生产上要能回答「尾部 result 到底晚到多久」
+      log(
+        `[stt:ali:stream] result after task-finished +${
+          taskFinishedAtMs > 0 ? Date.now() - taskFinishedAtMs : -1
+        }ms len=${shown.length}`,
+      );
+      armFinalGrace();
+      armEmptySettle();
+    }
   };
 
   const sendPcm = (chunk: Uint8Array): void => {
@@ -1644,12 +1832,10 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
         // 但最后一条 result 可能跟在它后面，所以留 150ms 宽限再发 final，
         // 否则可能发出半句。
         taskFinished = true;
-        if (finalGraceTimer === null) {
-          finalGraceTimer = setTimeout(() => {
-            finalGraceTimer = null;
-            emitFinal();
-          }, 150);
-        }
+        taskFinishedAtMs = Date.now();
+        armFinalGrace();
+        // 静默期从这一刻起算：期间任何 result 都会重置它
+        armEmptySettle();
       }
     };
 
@@ -1661,8 +1847,16 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
         log("[stt:ali:stream] idle prewarm connection closed");
         return;
       }
-      // 没拿到结果就断了：客户端必须收到收摊信号，否则它会一直等字幕
+      // 没拿到结果就断了：客户端必须收到收摊信号，否则它会一直等字幕。
+      // 但**上游已经权威收尾**（task-finished）之后自己关连接，不是错误：
+      // 有文本就照常发 final，没文本就走空结果静默收尾。否则一条本来正常的语音
+      // 会被报成 upstream-closed，客户端还会因此切到浏览器识别通道。
       if (!finalSent) {
+        if (taskFinished) {
+          emitFinal("upstream_closed");
+          finishEmptyUtterance();
+          return;
+        }
         sinkSend({ type: "error", reason: "upstream-closed" });
         shutdown(1000, "upstream closed");
       }
@@ -1744,9 +1938,13 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
     currentText = "";
     lastInterim = "";
     finalSent = false;
+    finalTextSent = "";
     finishRequested = false;
     sentenceEnded = false;
     taskFinished = false;
+    emptySettled = false;
+    emptySettleTimer = clearTimer(emptySettleTimer);
+    taskFinishedAtMs = 0;
     taskReady = false;
     taskStarting = null;
     pendingPcm.length = 0;
@@ -1768,6 +1966,11 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
   const endUtterance = (): void => {
     utteranceActive = false;
     utteranceTimer = clearTimer(utteranceTimer);
+    // 兜底：这句的任何等待定时器都不能活到下一句去（上一句的旧 resultTimer
+    // 在下一句里触发 = 用户说着话突然被判超时）
+    resultTimer = clearTimer(resultTimer);
+    finalGraceTimer = clearTimer(finalGraceTimer);
+    emptySettleTimer = clearTimer(emptySettleTimer);
     killEncoder();
     closeUpstream();
     if (!tearingDown) openUpstream();
@@ -1775,7 +1978,7 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
 
   /** 等 final（sentence_end / task-finished 触发） */
   const waitFinal = (): Promise<void> => {
-    if (finalSent) return Promise.resolve();
+    if (finalSent || emptySettled) return Promise.resolve();
     return new Promise<void>((resolve) => {
       finalWaiter = resolve;
       resultTimer = setTimeout(() => {
@@ -1783,7 +1986,7 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
         const waiter = finalWaiter;
         finalWaiter = null;
         // 超时**不是**静默丢句：有文本先把 final 给出去，再报一条明确的 error
-        emitFinal();
+        emitFinal("timeout");
         waiter?.();
         if (closed) return;
         sinkSend({ type: "error", reason: "result-timeout" });
@@ -1864,8 +2067,10 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
       // ④ 等 final
       //    上游可能在我们发 finish-task 之前就已经把这句话收完了（用户说完的自然停顿
       //    正好落在一句话末尾）—— 那就不用再等，直接给 final。
-      if (taskFinished || sentenceEnded) emitFinal();
-      await waitFinal();
+      if (taskFinished || sentenceEnded) emitFinal("finalize_check");
+      // 已经有终稿，或已经按「空结果」安静收尾过 → 不再进 waitFinal
+      // （进去就是 15s 干等 + 报错 + 拆会话）。
+      if (!finalSent && !emptySettled) await waitFinal();
       if (closed) return;
       endUtterance();
     } finally {

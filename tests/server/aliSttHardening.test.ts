@@ -10,7 +10,7 @@
  *   ⑥ 句子边界：只由显式 finish_utterance 决定（帧间隔抖动不许切句）；
  *   ⑦ 能力上报：上游不发 speech_started → 客户端改走 energy VAD（不伪造）。
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import {
   ALI_ASR_MODEL,
   ALI_ASR_WS_URL,
@@ -25,6 +25,28 @@ import { resolveBargeInSource } from "../../src/web/voice/bargeInSource";
 const FAKE_KEY = "dashscope-test-key";
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * 每条用例创建的桥都要在结束时 clientClosed()。
+ * 模块级 activeSessions 上限 32 且**跨测试文件共享**：这里建了 21 个桥却只关了少数，
+ * 跑满之后别的测试文件会直接收到 `too many sessions` 而失败（表现为「单文件全过、
+ * 全量却挂无关用例」的顺序依赖 flaky）。
+ */
+const liveBridges: Array<{ clientClosed(): void }> = [];
+function trackWhole(options: Parameters<typeof createAliSttBridge>[0]) {
+  const bridge = createAliSttBridge(options);
+  liveBridges.push(bridge);
+  return bridge;
+}
+afterEach(() => {
+  for (const bridge of liveBridges.splice(0)) {
+    try {
+      bridge.clientClosed();
+    } catch {
+      /* 已经收摊了 */
+    }
+  }
+});
 
 async function until(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -162,7 +184,7 @@ describe("① 进程纪律：ffmpeg 子进程在任何收尾路径都被 kill（
     const { connect } = erroringConnect();
     const { messages, sink } = fakeSink();
     const { factory, encoders } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
+    const bridge = trackWhole({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
 
     bridge.pushAudio(new Uint8Array([1, 2, 3]));
     await until(() => messages.some((m) => m.type === "error"));
@@ -206,7 +228,7 @@ describe("① 进程纪律：ffmpeg 子进程在任何收尾路径都被 kill（
     };
     const { messages, sink } = fakeSink();
     const { factory, encoders } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
+    const bridge = trackWhole({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
 
     bridge.pushAudio(new Uint8Array([1, 2, 3]));
     bridge.finishUtterance();
@@ -221,7 +243,7 @@ describe("① 进程纪律：ffmpeg 子进程在任何收尾路径都被 kill（
     const { connect } = okConnect();
     const { sink } = fakeSink();
     const { factory, encoders } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
+    const bridge = trackWhole({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
 
     bridge.pushAudio(new Uint8Array([1, 2, 3]));
     bridge.clientClosed();
@@ -236,7 +258,7 @@ describe("① 进程纪律：ffmpeg 子进程在任何收尾路径都被 kill（
     const { sink } = fakeSink();
     // 转码卡住（finish 永不返回）：模拟「客户端在转码途中跑了」
     const { factory, encoders } = trackingEncoder("hang");
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -258,7 +280,7 @@ describe("① 进程纪律：ffmpeg 子进程在任何收尾路径都被 kill（
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory, encoders } = trackingEncoder("throw");
-    const bridge = createAliSttBridge({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
+    const bridge = trackWhole({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
 
     bridge.pushAudio(new Uint8Array([1, 2, 3]));
     bridge.finishUtterance();
@@ -273,7 +295,7 @@ describe("① 进程纪律：ffmpeg 子进程在任何收尾路径都被 kill（
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory, encoders } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
+    const bridge = trackWhole({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
 
     bridge.pushAudio(new Uint8Array([1, 2, 3]));
     bridge.finishUtterance();
@@ -324,7 +346,7 @@ describe("② 会话资源上限：越界就是明确的 error（不是静默截
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -348,7 +370,7 @@ describe("② 会话资源上限：越界就是明确的 error（不是静默截
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -379,9 +401,8 @@ describe("② 会话资源上限：越界就是明确的 error（不是静默截
     });
     // 直接用阿里桥测并发上限（createSttBridge 不透传 maxSessions）
     void bridge;
-    const { createAliSttBridge } = await import("../../src/server/aliStt.ts");
     const first = fakeSink();
-    const a = createAliSttBridge({
+    const a = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink: first.sink,
@@ -389,7 +410,7 @@ describe("② 会话资源上限：越界就是明确的 error（不是静默截
       maxSessions: 1,
     });
     const second = fakeSink();
-    const b = createAliSttBridge({
+    const b = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink: second.sink,
@@ -430,7 +451,7 @@ describe("③ 预算：每个阶段都有硬上限，到点必须有结论", () 
     };
     const { messages, sink } = fakeSink();
     const { factory } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -454,7 +475,7 @@ describe("③ 预算：每个阶段都有硬上限，到点必须有结论", () 
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory } = trackingEncoder("hang");
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -474,7 +495,7 @@ describe("③ 预算：每个阶段都有硬上限，到点必须有结论", () 
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -504,7 +525,7 @@ describe("③ 预算：每个阶段都有硬上限，到点必须有结论", () 
     });
     const { messages, sink } = fakeSink();
     const { factory } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -530,7 +551,7 @@ describe("⑤ ffmpeg 起不来：异常不许逃出 pushAudio", () => {
   test("转码器工厂抛错 → 报 audio-encode-failed，不抛到 WS handler 上层", async () => {
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -553,7 +574,7 @@ describe("⑤ ffmpeg 起不来：异常不许逃出 pushAudio", () => {
   test("写管道失败 → 报 audio-encode-failed", async () => {
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -585,7 +606,7 @@ describe("⑥ 句子边界：只由显式 finish_utterance 决定", () => {
     const { connect, sockets } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
+    const bridge = trackWhole({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
 
     bridge.pushAudio(new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]));
     // 模拟浏览器调度抖动：两帧之间隔 200ms（旧的 120ms「静默」阈值会在这里误判）
@@ -609,7 +630,7 @@ describe("⑥ 句子边界：只由显式 finish_utterance 决定", () => {
     const { connect, sockets } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory, encoders } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
+    const bridge = trackWhole({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
 
     // 模拟 MediaRecorder：第一块只有 176B（EBML 头），后面是裸 cluster
     bridge.pushAudio(new Uint8Array(176).fill(1));
@@ -633,7 +654,7 @@ describe("⑥ 句子边界：只由显式 finish_utterance 决定", () => {
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({
+    const bridge = trackWhole({
       apiKey: FAKE_KEY,
       connect,
       sink,
@@ -668,7 +689,7 @@ describe("收尾态：客户端断开后不再新建上游连接", () => {
     };
     const { sink } = fakeSink();
     const { factory } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
+    const bridge = trackWhole({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
 
     expect(connects).toBe(1); // 预热建了一条
     bridge.pushAudio(new Uint8Array([1, 2, 3]));
@@ -687,7 +708,7 @@ describe("⑦ 能力上报：上游不发 speech_started → 客户端改走 ene
     const { connect } = okConnect();
     const { messages, sink } = fakeSink();
     const { factory } = trackingEncoder("ok");
-    const bridge = createAliSttBridge({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
+    const bridge = trackWhole({ apiKey: FAKE_KEY, connect, sink, encoder: factory });
 
     expect(messages[0]).toEqual({
       type: "capabilities",
