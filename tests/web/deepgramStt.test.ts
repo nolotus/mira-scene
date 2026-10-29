@@ -9,8 +9,11 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  AUTO_FINISH_QUIET_MS,
+  AUTO_FINISH_SENTENCE_MS,
   CHUNK_MS,
   RECORDER_MIME,
+  autoFinishDelayMs,
   createDeepgramStt,
   type DeepgramSttDiagnostics,
   type MediaStreamLike,
@@ -407,5 +410,82 @@ describe("DeepgramStt 其它", () => {
     expect(h.errors.at(-1)?.code).toBe("denied");
     expect(stt.channel).toBe("deepgram"); // 麦克风问题是权限，不是通道问题
     stt.abort();
+  });
+});
+
+describe("静音自动收尾：接线（不只是纯函数）", () => {
+  /** 等到「带标点应收尾」的阈值之后再留 200ms 余量 */
+  const SENTENCE_WAIT = AUTO_FINISH_SENTENCE_MS + 200;
+
+  test("带句末标点的 interim → 短阈值内真的触发 recorder.stop（接线没被改回默认值）", async () => {
+    const h = harness();
+    const stt = createDeepgramStt(h.options);
+    stt.start();
+    await flush();
+    h.socket.open();
+    h.socket.emit({ type: "interim", text: "外面还在下雨吗？" });
+    expect(h.recorder.stopped).toBe(0);
+    await Bun.sleep(SENTENCE_WAIT);
+    // 这条断言就是核心收益：如果实现退回固定 900ms，这里会仍是 0
+    expect(h.recorder.stopped).toBe(1);
+    stt.abort();
+  });
+
+  test("不带句末标点的 interim → 同一时刻还没收尾（长句不被腰斩）", async () => {
+    const h = harness();
+    const stt = createDeepgramStt(h.options);
+    stt.start();
+    await flush();
+    h.socket.open();
+    h.socket.emit({ type: "interim", text: "我想说的是" });
+    await Bun.sleep(SENTENCE_WAIT);
+    expect(h.recorder.stopped).toBe(0);
+    // 到默认阈值之后才收尾
+    await Bun.sleep(AUTO_FINISH_QUIET_MS - AUTO_FINISH_SENTENCE_MS + 200);
+    expect(h.recorder.stopped).toBe(1);
+    stt.abort();
+  }, 5000);
+
+  test("空白 interim 不会取消上一条真实文本已挂的计时器", async () => {
+    const h = harness();
+    const stt = createDeepgramStt(h.options);
+    stt.start();
+    await flush();
+    h.socket.open();
+    h.socket.emit({ type: "interim", text: "外面还在下雨吗？" });
+    h.socket.emit({ type: "interim", text: "   " });
+    await Bun.sleep(SENTENCE_WAIT);
+    expect(h.recorder.stopped).toBe(1);
+    stt.abort();
+  });
+});
+
+describe("静音自动收尾的阈值自适应", () => {
+  test("句末标点 → 短阈值（不必等满 900ms）", () => {
+    for (const text of ["外面还在下雨吗？", "我知道了。", "真的吗！", "好吧…", "OK!"]) {
+      expect(autoFinishDelayMs(text)).toBe(AUTO_FINISH_SENTENCE_MS);
+    }
+  });
+
+  test("没有句末标点（长句说到一半）→ 仍旧等默认阈值，不腰斩", () => {
+    for (const text of ["我想说的是", "你今天晚上", "雨好像小了一点点但"]) {
+      expect(autoFinishDelayMs(text)).toBe(AUTO_FINISH_QUIET_MS);
+    }
+  });
+
+  test("句内停顿不算句子结束", () => {
+    for (const text of ["我想说的是，", "嗯、那个", "先等一下 然后"]) {
+      expect(autoFinishDelayMs(text)).toBe(AUTO_FINISH_QUIET_MS);
+    }
+  });
+
+  test("空白不给阈值（不收尾）", () => {
+    expect(autoFinishDelayMs("")).toBeNull();
+    expect(autoFinishDelayMs("   ")).toBeNull();
+  });
+
+  test("短阈值必须显著小于默认阈值，且仍远大于句内自然停顿", () => {
+    expect(AUTO_FINISH_SENTENCE_MS).toBeLessThan(AUTO_FINISH_QUIET_MS);
+    expect(AUTO_FINISH_SENTENCE_MS).toBeGreaterThanOrEqual(400);
   });
 });

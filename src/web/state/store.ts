@@ -42,6 +42,7 @@ import {
 // 迟早会跟服务端差一格（尤其是在 emoji / 组合字符上）。
 import { charCount } from "../../server/director/cues.ts";
 import type { AudioChunkSink, AudioMode, TTSProvider } from "../voice/tts";
+import type { FillerPlayer } from "../voice/filler";
 import { hasAudioChunkSink } from "../voice/tts";
 import type { SttLang } from "../voice/stt";
 
@@ -207,6 +208,11 @@ export interface SessionView {
 
 export interface SessionStoreDeps {
   api: SessionApi;
+  /**
+   * 垫音（可选）：发送那一刻先出一声「嗯」，填掉等模型首字的空白。
+   * 真实语音一到（首个 text.delta / audio.chunk）必须立刻 stop，绝不与 TTS 叠音。
+   */
+  filler?: FillerPlayer;
   tts: TTSProvider & Partial<AudioChunkSink>;
   audioMode: AudioMode;
   /** 这个会话请求的导演档位（来自 `?director=`）；不传则从 location.search 读 */
@@ -552,6 +558,7 @@ export class SessionStore {
     this.offOnline();
     this.inflight?.abort();
     this.inflight = null;
+    this.deps.filler?.stop();
     this.deps.tts.cancel();
     this.listeners.clear();
   }
@@ -767,7 +774,12 @@ export class SessionStore {
           this.machine = reduceBargeIn(this.machine);
           return this.machine.epoch;
         },
-        cancelAudio: () => this.deps.tts.cancel(),
+        // 垫音也要一起停：打断会 bump epoch，旧轮的 turn.end 会被闸门丢弃，
+        // 那一轮唯一的 stop 就永远不会执行 → playing 卡在 true，下一轮的「嗯」被早退吃掉
+        cancelAudio: () => {
+          this.deps.filler?.stop();
+          this.deps.tts.cancel();
+        },
         abortInflight: () => {
           this.inflight?.abort();
           this.inflight = null;
@@ -904,6 +916,8 @@ export class SessionStore {
     const turnId = newTurnId();
     this.machine = reduceRequestSent(this.machine, turnId, this.clock());
     obsEvent("turn:send", { turnId, detail: { chars: userText.length } });
+    // 垫音：从这一毫秒起用户就有反馈，不等模型首字
+    this.deps.filler?.play();
     // 新一轮从零字数开始（reduceRequestSent 已把 text 清空），旧队列一并作废
     this.resetCues();
     this.emit();
@@ -1056,6 +1070,7 @@ export class SessionStore {
     if (event.type === "text.delta") this.cueWatermark = charCount(machine.text);
 
     // 只有真正被接受的事件才驱动声音：迟到/串轮的音频分片连解码都不做
+    if (event.type === "audio.chunk") this.deps.filler?.stop();
     if (event.type === "audio.chunk" && hasAudioChunkSink(this.deps.tts)) {
       this.deps.tts.pushChunk({
         seq: event.seq,
@@ -1065,10 +1080,13 @@ export class SessionStore {
       });
     }
     if (event.type === "text.delta") {
+      // 真话已经到了，垫音必须让位（同一毫秒内停 + 播，听感上是「嗯—」接正文）
+      this.deps.filler?.stop();
       this.deps.tts.speak(event.text);
     }
 
     if (event.type === "turn.end") {
+      this.deps.filler?.stop();
       if (event.interrupted) this.deps.tts.cancel();
       else this.deps.tts.flush();
       obsEvent("turn:end", { turnId: event.turnId, detail: { interrupted: event.interrupted } });
@@ -1077,6 +1095,7 @@ export class SessionStore {
     }
 
     if (event.type === "error") {
+      this.deps.filler?.stop();
       obsEvent("error", {
         turnId: event.turnId,
         detail: { message: event.message, recoverable: event.recoverable },

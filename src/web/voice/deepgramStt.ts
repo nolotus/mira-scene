@@ -68,6 +68,29 @@ export const FINISH_UTTERANCE = JSON.stringify({ type: "finish_utterance" });
  */
 export const AUTO_FINISH_QUIET_MS = 900;
 
+/**
+ * 句末标点已经出现时的收尾阈值：450ms。
+ *
+ * 为什么可以更短：上游给的中文转写通常自带 `。？！`，一旦句号到了，用户这句的语义
+ * 已经闭合，剩下的可能性只有「他还在补充」——那种情况在对话里是少数，而且 450ms
+ * 比人手点一下「关闭麦克风」仍然快得多。用标点做自适应比整体压低阈值安全：
+ * 没标点（长句说到一半）时仍旧等 900ms，不会腰斩。
+ */
+export const AUTO_FINISH_SENTENCE_MS = 450;
+
+/** 句末标点：只认中文全角与英文句末，`,，、` 不算（那是句内停顿） */
+const SENTENCE_END = /[。．.!！?？…]$/;
+
+/**
+ * 这一条 interim 该等多久才收尾（纯函数，便于测试）。
+ * 带句末标点 → 短阈值；否则 → 默认阈值；空白 → 不收尾（返回 null）。
+ */
+export function autoFinishDelayMs(text: string): number | null {
+  const trimmed = typeof text === "string" ? text.trim() : "";
+  if (!trimmed) return null;
+  return SENTENCE_END.test(trimmed) ? AUTO_FINISH_SENTENCE_MS : AUTO_FINISH_QUIET_MS;
+}
+
 /** 预建连队列上限：1.5s。超出丢最旧帧并计入 `prerollDropped`（见 diagnostics） */
 export const PRE_ROLL_MAX_CHUNKS = Math.ceil(1500 / CHUNK_MS);
 
@@ -381,6 +404,10 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
    */
   function armAutoFinish(text: string): void {
     if (!listening || disposed || diagnostics.channel !== "deepgram") return;
+    // 先算延迟：空白 interim 不该把上一条真实文本已经挂上的计时器取消掉
+    // （审查指出：改动前空白会 arm 900ms，若先清后判会让那句失去自动收尾）
+    const delay = autoFinishDelayMs(text);
+    if (delay === null) return;
     if (text === lastInterimText) return;
     lastInterimText = text;
     clearAutoFinish();
@@ -389,10 +416,10 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
       // 守卫含 channel：回退到 Web Speech 之后，这个定时器绝不能再碰 deepgram 的 stop()，
       // 否则会把刚起来的 Web Speech 会话掐断（审查实测路径：ws-send-failed → switchToFallback）
       if (!listening || disposed || diagnostics.channel !== "deepgram") return;
-      log(`[stt] auto-finish: 转写静止 ${AUTO_FINISH_QUIET_MS}ms，替用户收尾`);
-      markTrace("stt:auto-finish", `quietMs=${AUTO_FINISH_QUIET_MS}`);
+      log(`[stt] auto-finish: 转写静止 ${delay}ms，替用户收尾`);
+      markTrace("stt:auto-finish", `quietMs=${delay}`);
       controller.stop();
-    }, AUTO_FINISH_QUIET_MS);
+    }, delay);
   }
 
   function handleMessage(raw: unknown): void {
