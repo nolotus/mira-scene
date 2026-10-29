@@ -276,18 +276,6 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                     <stop offset="0.78" stopColor="#b06c26" />
                     <stop offset="1" stopColor="#7d4615" />
                   </linearGradient>
-                  {/* 袖子出画渐隐：袖口不再是「平口截断」（那读作断肢），
-                      而是从 y≈468 起逐渐透明，读作小臂继续往画面外延伸 */}
-                  <linearGradient id="mx-arm-fade" gradientUnits="userSpaceOnUse" x1="200" y1="452" x2="200" y2="536">
-                    {/* 452（全显）→ 536（全隐）：审查指出原来 468→566 在 y=536 仍有 31% 不透明，
-                        会留一圈「鬼影边」。收紧后袖口在画面内就淡干净了。 */}
-                    <stop offset="0" stopColor="#ffffff" />
-                    <stop offset="0.55" stopColor="#9a9a9a" />
-                    <stop offset="1" stopColor="#000000" />
-                  </linearGradient>
-                  <mask id="mx-arm-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="400" height="560">
-                    <rect x="0" y="0" width="400" height="560" fill="url(#mx-arm-fade)" />
-                  </mask>
                   <linearGradient id="mx-coat-dark" x1="0" y1="0" x2="0.4" y2="1">
                     <stop offset="0" stopColor="#a35f20" />
                     <stop offset="1" stopColor="#6d3b12" />
@@ -499,21 +487,44 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                 </g>
 
                 {/* 7. 上臂（独立组，origin 在肩关节）：姿势与动作都会抬肩/转袖 */}
-                <g className="char-arm char-arm-l" mask="url(#mx-arm-mask)">
+                {/* 袖口与手共用上臂骨架，不另加位移动画；腕根藏进收口内，避免转肩时脱节。 */}
+                <g className="char-arm char-arm-l">
                   <path
                     className="sleeve"
-                    d="M96,368 C86,398 80,436 80,472 C80,502 84,524 90,540 C94,550 114,550 118,540 C116,516 115,486 117,452 C119,420 122,392 124,372 Z"
+                    d="M96,368 C86,398 80,436 80,468 C80,479 83,488 87,494 Q101,501 116,493 C115,480 116,466 117,452 C119,420 122,392 124,372 Z"
                     fill="url(#mx-sleeve)"
                   />
-                  <path d="M118,378 C112,412 108,456 110,498" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
+                  <path d="M118,378 C112,412 108,450 110,478 M84,471 Q92,479 91,486 M115,470 Q105,480 108,488" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
+                  {/* 袖口内腔 → 腕掌 → 前侧布边：遮挡关系让手从袖内长出来。 */}
+                  <path d="M86,487 Q101,493 116,486 L116,499 Q102,507 88,499 Z" fill="#593619" />
+                  <path
+                    d="M92,493 C92,501 91,507 92,514 L94,526 Q96,532 101,533 L107,533 Q113,532 114,526 L114,516 Q119,520 121,516 Q122,513 118,508 L111,501 L110,493 Z"
+                    fill="url(#mx-skin)" stroke="#b77f64" strokeWidth="1.2" strokeLinejoin="round"
+                  />
+                  <path d="M110,505 Q106,511 111,517 M99,524 L100,529 M105,524 L105,530" fill="none" stroke="#bd896e" strokeWidth="1.1" strokeLinecap="round" opacity="0.65" />
+                  <path d="M85,483 Q100,490 116,483 L116,494 Q102,502 87,495 Z" fill="url(#mx-sleeve)" stroke="#754719" strokeWidth="1.2" />
+                  <path d="M88,486 Q101,492 113,487" fill="none" stroke="#e4b16f" strokeWidth="1.6" opacity="0.7" />
+                  <path d="M89,493 Q102,499 114,493" fill="none" stroke="#603816" strokeWidth="1.2" />
                 </g>
-                <g className="char-arm char-arm-r" mask="url(#mx-arm-mask)">
-                  <path
-                    className="sleeve"
-                    d="M304,368 C314,398 320,436 320,472 C320,502 316,524 310,540 C306,550 286,550 282,540 C284,516 285,486 283,452 C281,420 278,392 276,372 Z"
-                    fill="url(#mx-sleeve)"
-                  />
-                  <path d="M282,378 C288,412 292,456 290,498" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
+                <g className="char-arm char-arm-r">
+                  {/* 镜像局部几何，保留原有左右臂的独立 CSS 变换与动作钩子。 */}
+                  <g transform="translate(400,0) scale(-1,1)">
+                    <path
+                      className="sleeve"
+                      d="M96,368 C86,398 80,436 80,468 C80,479 83,488 87,494 Q101,501 116,493 C115,480 116,466 117,452 C119,420 122,392 124,372 Z"
+                      fill="url(#mx-sleeve)"
+                    />
+                    <path d="M118,378 C112,412 108,450 110,478 M84,471 Q92,479 91,486 M115,470 Q105,480 108,488" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
+                    <path d="M86,487 Q101,493 116,486 L116,499 Q102,507 88,499 Z" fill="#593619" />
+                    <path
+                      d="M92,493 C92,501 91,507 92,514 L94,526 Q96,532 101,533 L107,533 Q113,532 114,526 L114,516 Q119,520 121,516 Q122,513 118,508 L111,501 L110,493 Z"
+                      fill="url(#mx-skin)" stroke="#b77f64" strokeWidth="1.2" strokeLinejoin="round"
+                    />
+                    <path d="M110,505 Q106,511 111,517 M99,524 L100,529 M105,524 L105,530" fill="none" stroke="#bd896e" strokeWidth="1.1" strokeLinecap="round" opacity="0.65" />
+                    <path d="M85,483 Q100,490 116,483 L116,494 Q102,502 87,495 Z" fill="url(#mx-sleeve)" stroke="#754719" strokeWidth="1.2" />
+                    <path d="M88,486 Q101,492 113,487" fill="none" stroke="#e4b16f" strokeWidth="1.6" opacity="0.7" />
+                    <path d="M89,493 Q102,499 114,493" fill="none" stroke="#603816" strokeWidth="1.2" />
+                  </g>
                 </g>
 
                 {/* 杯子（hold_cup 才出现） */}
