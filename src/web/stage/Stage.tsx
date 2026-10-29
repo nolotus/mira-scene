@@ -148,10 +148,25 @@ export function Stage({
             </div>
           ) : null}
 
-          <div className="stage-subtitle" data-empty={hasSubtitle ? "false" : "true"} aria-live="polite">
-            <p key={`sub-${beat.n}`} className="sub">
-              {state.subtitle}
-            </p>
+          <div
+            className="stage-subtitle"
+            data-empty={hasSubtitle ? "false" : state.characterStatus === "thinking" ? "thinking" : "true"}
+            aria-live="polite"
+          >
+            {hasSubtitle ? (
+              <p key={`sub-${beat.n}`} className="sub">
+                {state.subtitle}
+              </p>
+            ) : state.characterStatus === "thinking" ? (
+              <div className="thinking-cue" role="status" aria-label="Mira 正在思考">
+                <span className="thinking-dots" aria-hidden="true">
+                  <span className="thinking-dot" />
+                  <span className="thinking-dot" />
+                  <span className="thinking-dot" />
+                </span>
+                <span className="thinking-text">Mira 正在思考…</span>
+              </div>
+            ) : null}
           </div>
 
           {/* 交互入口的固定挂载槽位：文字 / 语音控件由上层注入，本层只负责位置与安全区 */}

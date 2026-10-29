@@ -923,7 +923,7 @@
 }
 @keyframes chestBreath {
   0%, 100% { transform: scale(1, 1); }
-  50% { transform: scaleX(calc(1 + var(--breath-amp, 1) * 0.003)) scaleY(calc(1 + var(--breath-amp, 1) * 0.005)); }
+  50% { transform: scaleX(calc(1 + var(--breath-amp, 1) * 0.012)) scaleY(calc(1 + var(--breath-amp, 1) * 0.018)); }
 }
 @keyframes liquidSettle {
   0%, 100% { transform: scaleY(1); }
@@ -1120,12 +1120,26 @@
 }
 
 .char-rig[data-status="thinking"] .think-motes circle {
-  opacity: 0.75;
-  animation: mote 4.6s ease-in-out infinite;
+  opacity: 0.85;
+  animation: mote 3.6s ease-in-out infinite;
 }
 
-.char-rig[data-status="thinking"] .think-motes circle:nth-child(2) { animation-delay: 1.1s; }
-.char-rig[data-status="thinking"] .think-motes circle:nth-child(3) { animation-delay: 2.2s; }
+.char-rig[data-status="thinking"] .think-motes circle:nth-child(2) { animation-delay: 0.9s; }
+.char-rig[data-status="thinking"] .think-motes circle:nth-child(3) { animation-delay: 1.8s; }
+
+/* 思考：轻微偏头沉思起伏（微动证明非卡死） */
+.char-rig[data-status="thinking"][data-act="none"] .char-head-act {
+  animation: thinkBob 3.2s ease-in-out infinite;
+}
+
+@keyframes thinkBob {
+  0%, 100% {
+    transform: rotate(0deg) translate3d(0, 0, 0);
+  }
+  50% {
+    transform: rotate(-1.5deg) translate3d(-1px, 2px, 0);
+  }
+}
 
 /* 说话：轻微点头（只在没有一次性动作时接管，动作优先） */
 .char-rig[data-speaking="true"][data-act="none"] .char-head-act {
@@ -1695,6 +1709,68 @@
 
 .stage-subtitle[data-empty="true"] { opacity: 0; }
 
+.stage-subtitle[data-empty="thinking"] {
+  opacity: 1;
+  background: linear-gradient(
+    180deg,
+    rgba(6, 10, 17, 0) 0%,
+    rgba(6, 10, 17, 0.48) 32%,
+    rgba(6, 10, 17, 0.72) 100%
+  );
+}
+
+.thinking-cue {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 28px;
+  user-select: none;
+}
+
+.thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.thinking-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #c8b6ff;
+  opacity: 0.35;
+  animation: thinkingDotPulse 1.4s ease-in-out infinite;
+}
+
+.thinking-dot:nth-child(2) {
+  animation-delay: 0.22s;
+}
+
+.thinking-dot:nth-child(3) {
+  animation-delay: 0.44s;
+}
+
+.thinking-text {
+  font-size: clamp(13px, 3.2vw, 15px);
+  font-weight: 500;
+  color: rgba(245, 241, 236, 0.88);
+  letter-spacing: 0.02em;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.7);
+}
+
+@keyframes thinkingDotPulse {
+  0%, 100% {
+    opacity: 0.35;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.25);
+    box-shadow: 0 0 8px rgba(200, 182, 255, 0.7);
+  }
+}
+
 .sub {
   display: -webkit-box;
   margin: 0;
@@ -1900,6 +1976,7 @@
   .stage-root .rain-sheet { animation: none !important; }
   .stage-root .lightning span { opacity: 0.55; }
   .stage-root .sub { animation: none !important; }
+  .stage-root .thinking-dot { animation: none !important; opacity: 0.8; }
 }
 
 /* ============================================================================
