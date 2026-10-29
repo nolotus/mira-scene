@@ -363,3 +363,26 @@ describe("LiveDirector · 零输出兜底（保证一定回话）", () => {
     }
   });
 });
+
+describe("LiveDirector · 兜底不带动作", () => {
+  test("say 为空但有 cues → 走兜底接话，且不投递任何指令", async () => {
+    // AGY 复审指出的缺口：原来 cues 会在兜底之前被调度出去，
+    // 于是「她什么都没说却动了」。
+    const payload = '{"say": "   ", "cues": [{"atChar":0,"d":{"kind":"emotion","emotion":"sad"}}]}';
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse(payload.match(/[\s\S]{1,8}/g) ?? [payload])) as unknown as typeof fetch;
+    try {
+      const director = new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 });
+      const events: SessionEvent[] = [];
+      for await (const event of director.stream(liveInput, new AbortController().signal)) {
+        events.push(event);
+      }
+      const text = events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
+      expect(text.length).toBeGreaterThan(0); // 有回应
+      expect(events.filter((e) => e.type === "directive")).toEqual([]); // 但不带动作
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});

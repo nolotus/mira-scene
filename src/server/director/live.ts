@@ -351,7 +351,7 @@ export class LiveDirector implements Director {
         // 违约：不报错、不把可能夹带指令的残段交给字幕，安静收尾。
         // 只记长度，**绝不记原文**（emitted 是台词本身，写成 ${emitted} 会漏进日志）。
         console.warn(
-          `[director:live] payload invalid turn=${input.turnId} raw=${rawAll.length}chars emitted=${emitted.length}chars`,
+          `[director:live] payload invalid turn=${input.turnId} reason=invalid-payload raw=${rawAll.length}chars emitted=${emitted.length}chars`,
         );
         // **保证一定回话**（Sol 稳定性方案的第一层）：
         // 这一轮一个字都没发出去 → 用一句产品预审过的固定接话走正常字幕+TTS 管道，
@@ -360,7 +360,7 @@ export class LiveDirector implements Director {
         // 已经发出过 text.delta 的轮次**不**这样做：声音无法撤回，重来会双播/自相矛盾。
         if (emitted.length === 0) {
           const fallback = FALLBACK_LINE.slice(0, MAX_SAY_CHARS);
-          console.warn(`[director:live] fallback replied turn=${input.turnId}`);
+          console.warn(`[director:live] fallback replied turn=${input.turnId} reason=invalid-payload`);
           for (const piece of chunkText(fallback)) {
             if (signal.aborted) return;
             emitted += piece;
@@ -383,8 +383,12 @@ export class LiveDirector implements Director {
       }
 
       {
-        // 扫描器已经放出去的那批不重复；剩下的（旧格式 directives / 尾巴才到的 cues）在这里补
-        scheduler.feed(payload.cues.slice(Math.max(0, scanner.cues.length)));
+        // 扫描器已经放出去的那批不重复；剩下的（旧格式 directives / 尾巴才到的 cues）在这里补。
+        // **say 为空时不调度任何 cue**：这一轮要走兜底接话，兜底承诺「不带任何动作」，
+        // 否则会出现「她什么都没说却动了」这种更怪的输出（AGY 复审指出）。
+        if (payload.say.trim()) {
+          scheduler.feed(payload.cues.slice(Math.max(0, scanner.cues.length)));
+        }
         for (const cue of scheduler.advance(spoken)) {
           if (signal.aborted) return;
           yield this.#cueEvent(input, cue);
