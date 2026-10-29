@@ -35,6 +35,7 @@ import {
   type SttLang,
   type SttOptions,
 } from "./stt.ts";
+import { pushBoundedPreRoll } from "./preRollQueue";
 import type { AecState } from "./bargeInGate.ts";
 import { markTrace } from "./bargeInTrace.ts";
 import {
@@ -593,9 +594,8 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
         if (!data) return;
         if (!socket || !socketReady) {
           // 握手还没完成：**不能丢**（用户很可能此刻就在说话）。进有界队列，open 后按序补发。
-          preRoll.push(data);
-          if (preRoll.length > PRE_ROLL_MAX_CHUNKS) {
-            preRoll.shift();
+          // 溢出策略见 ui 无关的纯函数（首块永不丢弃，否则服务端 ffmpeg 无头可解）
+          if (pushBoundedPreRoll(preRoll, data, PRE_ROLL_MAX_CHUNKS).dropped) {
             preRollDropped += 1;
             setDiag({ prerollDropped: preRollDropped });
             markTrace("stt:preroll-drop", `dropped=${preRollDropped}`);

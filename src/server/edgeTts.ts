@@ -338,7 +338,15 @@ export function createEdgeTtsSynthesizer(
 
       const started = performance.now();
       try {
-        const result = await runner({ text, voice, rate, pitch, timeoutMs });
+        const attempt = () => runner({ text, voice, rate, pitch, timeoutMs });
+        let result = await attempt();
+        // 首次调用偶发失败：线上实测 `[tts:edge] fail kind=exit ... 1656ms`，
+        // 紧接着同样的请求就成功（12:51:38 失败 → 12:51:50 正常出音频）。
+        // 代价只是一次进程启动，收益是消掉「开场第一句没声音」这种最刺眼的失败。
+        if (!result.ok) {
+          log(`[tts:edge] retry after kind=${result.kind} voice=${voice}`);
+          result = await attempt();
+        }
         const ms = Math.round(performance.now() - started);
         if (!result.ok) {
           // 只有类别，没有文本、没有 stderr 原文
