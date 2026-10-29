@@ -127,9 +127,31 @@ describe("EMOTION_FACE：七情绪映射", () => {
     expect(Object.keys(EMOTION_FACE)).toHaveLength(7);
   });
 
-  test("七种情绪两两可区分：没有两种情绪共用同一组眼+嘴", () => {
-    const keys = Object.values(EMOTION_FACE).map((f) => faceKey(f.eyes, f.mouth));
-    expect(new Set(keys).size).toBe(keys.length);
+  test("七种情绪：六组可区分 + 一对近义合并（curious/amused）", () => {
+    const byKey = new Map<string, string[]>();
+    for (const [emotion, face] of Object.entries(EMOTION_FACE)) {
+      const key = faceKey(face.eyes, face.mouth);
+      byKey.set(key, [...(byKey.get(key) ?? []), emotion]);
+    }
+    const dupes = [...byKey.values()].filter((list) => list.length > 1);
+    /*
+     * 为什么允许且只允许一对：待机不许张成圆口（写实脸张嘴 = 恐怖谷），
+     * 嘴只剩 closed / half 两档，眼 3 档里 closed 基本归眨眼 → 可用组合 6 组 < 7 种情绪。
+     * 合并选在 curious / amused：两者在照片上都是「眼压低 + 唇微启」，语义最近。
+     */
+    expect(dupes.length).toBe(1);
+    expect([...dupes[0]].sort()).toEqual(["amused", "curious"]);
+    expect(byKey.size).toBe(6);
+  });
+
+  test("待机永不张成圆口：非说话态 mouth 不会是 open", () => {
+    const emotions = Object.keys(EMOTION_FACE) as Array<keyof typeof EMOTION_FACE>;
+    for (const emotion of emotions) {
+      for (const status of ["idle", "listening", "thinking"] as const) {
+        const face = faceAt({ emotion, status, subtitle: "外面还在下雨吗？", elapsedMs: 500 });
+        expect(face.mouth).not.toBe("open");
+      }
+    }
   });
 
   test("curious 与 surprised 不同图（用户明确要求）", () => {

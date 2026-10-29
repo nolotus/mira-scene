@@ -25,10 +25,10 @@
    * rect x=-154.5, w=739.1）。改成按舞台宽度取尺：左右各留 3%，高度由宽高比反推，
    * 于是人像完整落在舞台内，底部仍由 dock 截断（配合下面的渐隐，是设计不是裁切失误）。
    */
-  width: var(--photo-width, 94%);
+  width: var(--photo-width, 82%);
   height: auto;
   aspect-ratio: var(--photo-ar, 3 / 4);
-  max-height: var(--photo-height, 80%);
+  max-height: var(--photo-height, 68%);
   translate: -50% 0;
   will-change: transform;
   /* 照片是合成层，阴影交给底下场景；这里只保证不会被雨幕整片覆盖 */
@@ -169,6 +169,17 @@ html[data-mira-char="photo"] .char-rig {
   transition: opacity var(--photo-fade, 90ms) linear;
   user-select: none;
   -webkit-user-drag: none;
+  /*
+   * 与底图**同一套**调色。底图被压到 brightness≈0.84 / saturate≈0.88 之后，
+   * 贴片若保持原色，眼嘴附近就会浮出一块「更亮更鲜艳的矩形」——这不是羽化能修的。
+   */
+  filter: saturate(var(--photo-grade-sat, 0.88)) brightness(var(--photo-grade-bright, 0.84))
+    sepia(var(--photo-grade-sepia, 0.1));
+  /*
+   * 注意：羽化**不在这里**——`PhotoCharacter.patchStyle()` 会给每个贴片注入内联 mask，
+   * 内联优先级高于本类规则，在 CSS 里写 mask 是无效代码（2026-10-29 踩过）。
+   * 羽化参数改 `PhotoCharacter.tsx` 的 `PATCH_MASK`。
+   */
 }
 
 .char-photo__patch[data-on="true"] {

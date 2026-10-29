@@ -50,16 +50,27 @@ import "./photo.css";
 const vars = (o: Record<string, string>): CSSProperties => o as CSSProperties;
 
 /**
- * 补丁四边羽化：只在 6–10% 的边缘做 alpha 过渡，中心保持全不透明。
+ * 补丁四边羽化：边缘做 alpha 过渡，中心保持全不透明。
  * 两层线性渐变按 `mask-composite: intersect` 相交；不支持该属性的浏览器会退化成并集，
  * 也就是「几乎不羽化」——安全失败，不会糊掉眼睛。
+ *
+ * **这里是羽化唯一生效的位置**：`patchStyle()` 把它内联到每个贴片上，内联优先级高于
+ * `photo.css` 里的类规则（所以别在 CSS 里改 mask，改了也不会生效——2026-10-29 踩过）。
+ *
+ * 为什么只有 8%/10%（复现方法：`ffmpeg -v error -i public/char/mouth_closed.png -f rawvideo
+ * -pix_fmt rgba` 后逐像素统计，116×88）：
+ *   · 贴片 alpha 只有 {253, 255} —— 它是**不透明矩形**，不是带透明外框的贴纸；
+ *   · 暗内容（唇线与下唇阴影）有两条带：y≈34–50 与 y≈57–73，横向铺到 x≈14–100；
+ *   · 所以纵向实心核下沿必须在 y>73：18% 羽化的实心核下沿是 y=72.2，**正好切在暗带上**。
+ * 8%/10% 把实心核扩到 x 9–106 / y 9–79，四面都留余量；相对 18% 那个更激进的方案，
+ * 过渡带从 ~16px 收到 ~9px（相对原来的 6%/10% 基版反而是加宽）。想再加大，先重量一次 bbox。
  */
 const PATCH_MASK = {
   maskImage:
-    "linear-gradient(90deg, transparent 0, #000 6%, #000 94%, transparent 100%), linear-gradient(0deg, transparent 0, #000 10%, #000 90%, transparent 100%)",
+    "linear-gradient(90deg, transparent 0, #000 8%, #000 92%, transparent 100%), linear-gradient(0deg, transparent 0, #000 10%, #000 90%, transparent 100%)",
   maskComposite: "intersect",
   WebkitMaskImage:
-    "linear-gradient(90deg, transparent 0, #000 6%, #000 94%, transparent 100%), linear-gradient(0deg, transparent 0, #000 10%, #000 90%, transparent 100%)",
+    "linear-gradient(90deg, transparent 0, #000 8%, #000 92%, transparent 100%), linear-gradient(0deg, transparent 0, #000 10%, #000 90%, transparent 100%)",
   WebkitMaskComposite: "source-in",
 } as CSSProperties;
 

@@ -129,18 +129,19 @@ export function mouthAt(subtitle: string, elapsedMs: number): MouthVariant {
 export const EMOTION_FACE: Record<Emotion, { eyes: EyeVariant; mouth: MouthVariant }> = {
   // eyeOpen 1      / 嘴角平
   neutral: { eyes: "open", mouth: "closed" },
-  // eyeOpen 1.14   / 说话欲（半开）
-  curious: { eyes: "open", mouth: "half" },
+  // eyeOpen 1.14   / 说话欲（微启）—— 与 amused 共用一组，见下方「近义合并」说明
+  curious: { eyes: "half", mouth: "half" },
   // eyeOpen 0.84   / 柔和闭唇
   warm: { eyes: "half", mouth: "closed" },
-  // eyeOpen 0.7    / 笑意（半开半合）
+  // eyeOpen 0.7    / 笑意（半开半合）。**与 curious 合并**：两者在照片上都是「眼压低 + 唇微启」，
+  // 7 情绪 × (眼 3 档 × 嘴 2 档可用的 6 组) 凑不齐 7，这是唯一的近义合并，见 faceAt 的待机约束
   amused: { eyes: "half", mouth: "half" },
   // eyeOpen 1.06 但是「闭一下忍住」/ 抿嘴 —— 用 closed 与眨眼共用一张图属已知妥协
-  anxious: { eyes: "closed", mouth: "half" },
-  // eyeOpen 0.6    / 半张口的一声叹
-  sad: { eyes: "half", mouth: "open" },
-  // eyeOpen 1.28   / 圆口
-  surprised: { eyes: "open", mouth: "open" },
+  anxious: { eyes: "closed", mouth: "closed" },
+  // eyeOpen 0.6    / 垂眼抿唇（原「半张口的一声叹」：待机不张嘴，见 faceAt）
+  sad: { eyes: "closed", mouth: "half" },
+  // eyeOpen 1.28   / 睁大 + 唇微启（与 curious 靠眼档区分，不许同图）
+  surprised: { eyes: "open", mouth: "half" },
 };
 
 export interface FaceInput {
@@ -158,7 +159,13 @@ export function faceAt(input: FaceInput): { eyes: EyeVariant; mouth: MouthVarian
   const base = EMOTION_FACE[input.emotion];
   const eyes: EyeVariant = input.blinking ? "closed" : base.eyes;
   const speaking = input.status === "speaking" && input.subtitle.trim() !== "";
-  const mouth: MouthVariant = speaking ? mouthAt(input.subtitle, input.elapsedMs) : base.mouth;
+  /*
+   * 待机不张成圆口：写实脸上「一直张着嘴」是恐怖谷里最廉价的一分。
+   * 表里已经不出现 `open`，这里再兜一层——将来有人把 `open` 加回表里，
+   * 待机态也不会渲染出来（只有说话时的 `mouthAt()` 能给出 `open`）。
+   */
+  const restMouth: MouthVariant = base.mouth === "open" ? "half" : base.mouth;
+  const mouth: MouthVariant = speaking ? mouthAt(input.subtitle, input.elapsedMs) : restMouth;
   return { eyes, mouth };
 }
 
@@ -180,7 +187,7 @@ export const PHOTO_MOTION = {
   /** 状态切换过渡（ms）：120–200 之间，见 transitionMs() */
   transitionMs: 160,
   /** 变体交叉淡入（ms）：太快读作闪烁，太慢读作两张嘴 */
-  variantFadeMs: 90,
+  variantFadeMs: 120,
 } as const;
 
 /** 状态 → 站位（px / 倍率 / 度）。数值口径与 SVG STATUS_SPEC 同源，但只用于站位，不参与动画 */

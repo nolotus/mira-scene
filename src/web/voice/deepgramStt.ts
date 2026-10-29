@@ -56,6 +56,18 @@ export const RECORDER_MIME = "audio/webm;codecs=opus";
  */
 export const FINISH_UTTERANCE = JSON.stringify({ type: "finish_utterance" });
 
+/**
+ * 静音自动收尾：转写**不再增长**多久后，主动替用户说「这句完了」。
+ *
+ * 为什么要有它：麦克风是开关式的，用户说完话不点「关闭麦克风」就永远不触发收尾，
+ * 体感就是「我说完了她半天不理我」。这里只看 interim 是否还在长，不猜音量——
+ * 语音能量判静音在有背景音的场景里不可靠，而「转写停住了」几乎是用户停嘴的强信号。
+ *
+ * 900ms 的取值：句内自然停顿实测多在 300~700ms，700ms 会把长句腰斩；
+ * 900ms 仍比人手动点一下更早，且不会切碎正常长句。
+ */
+export const AUTO_FINISH_QUIET_MS = 900;
+
 /** 预建连队列上限：1.5s。超出丢最旧帧并计入 `prerollDropped`（见 diagnostics） */
 export const PRE_ROLL_MAX_CHUNKS = Math.ceil(1500 / CHUNK_MS);
 
@@ -197,6 +209,10 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
   let fallback: SttController | null = null;
   /** stop() 之后还欠一条「这句说完了」：等 recorder 的最后一个数据块送达再发 */
   let finishPending = false;
+  /** 静音自动收尾计时器（见 AUTO_FINISH_QUIET_MS）；null = 没在等 */
+  let autoFinishTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 上一次 interim 的原文：用来判断「转写还在长吗」 */
+  let lastInterimText = "";
   /** recorder 是否**原生**带 stop 事件（必须在挂回调之前判断，否则自己的赋值会把它变成 true） */
   let recorderHasStopEvent = false;
   /**
@@ -326,6 +342,9 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
   /** 从 Deepgram 侧整体退到 Web Speech（再不行退到纯文字）。每跳都留原因。 */
   function switchToFallback(reason: string): void {
     if (disposed || diagnostics.channel !== "deepgram") return;
+    // 退通道前先撤掉自动收尾：新通道（Web Speech）自己会管收尾，旧定时器不能跨通道生效
+    clearAutoFinish();
+    lastInterimText = "";
     const resume = wantListening;
     stopRecorder();
     closeSocket(reason);
@@ -348,6 +367,34 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
     log(`[stt] fallback → none reason=${reason}`);
   }
 
+  /** 取消自动收尾（任何显式动作都要先取消，避免「用户已点停 + 计时器又停一次」） */
+  function clearAutoFinish(): void {
+    if (autoFinishTimer !== null) {
+      clearTimeout(autoFinishTimer);
+      autoFinishTimer = null;
+    }
+  }
+
+  /**
+   * 每收到一条 interim 就重新计时；转写停住 AUTO_FINISH_QUIET_MS 就替用户收尾。
+   * 只在真正听着的时候计时，且只在文字**有变化**时重置（上游会重复上报同一条 interim）。
+   */
+  function armAutoFinish(text: string): void {
+    if (!listening || disposed || diagnostics.channel !== "deepgram") return;
+    if (text === lastInterimText) return;
+    lastInterimText = text;
+    clearAutoFinish();
+    autoFinishTimer = setTimeout(() => {
+      autoFinishTimer = null;
+      // 守卫含 channel：回退到 Web Speech 之后，这个定时器绝不能再碰 deepgram 的 stop()，
+      // 否则会把刚起来的 Web Speech 会话掐断（审查实测路径：ws-send-failed → switchToFallback）
+      if (!listening || disposed || diagnostics.channel !== "deepgram") return;
+      log(`[stt] auto-finish: 转写静止 ${AUTO_FINISH_QUIET_MS}ms，替用户收尾`);
+      markTrace("stt:auto-finish", `quietMs=${AUTO_FINISH_QUIET_MS}`);
+      controller.stop();
+    }, AUTO_FINISH_QUIET_MS);
+  }
+
   function handleMessage(raw: unknown): void {
     if (typeof raw !== "string") return;
     let payload: unknown;
@@ -364,7 +411,16 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
       const text = typeof record.text === "string" ? record.text : "";
       if (!text) return;
       options.onTranscript?.({ text, final: type === "final" });
-      if (type === "final") options.onSpeechFinal?.(text);
+      if (type === "final") {
+        // 上游自己给了终稿：不需要再替用户收尾
+        clearAutoFinish();
+        // 必须清掉「上一条 interim 原文」：否则下一句说到一模一样的短句（「好的」）
+        // 会因为 text === lastInterimText 而永不启动自动收尾（审查指出的静默失效）
+        lastInterimText = "";
+        options.onSpeechFinal?.(text);
+      } else {
+        armAutoFinish(text);
+      }
       return;
     }
     if (type === "speech_started") {
@@ -372,6 +428,10 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
       // 下次真机 trace 里如果只有 speech-started 而没有 stt:speech_started，问题在上游；
       // 反过来则是 App 侧接线断了。
       markTrace("stt:speech_started", "upstream");
+      // 上游刚报「开口了」→ 把静默时钟清掉：长句中途上游停顿 ≥阈值时，
+      // 不能因为「转写暂时没长」就把还在说话的用户收尾（审查指出的丢音频路径）
+      clearAutoFinish();
+      lastInterimText = "";
       options.onSpeechStarted?.();
       return;
     }
@@ -534,6 +594,9 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
         return false;
       }
       wantListening = true;
+      // 新一句开始：上一句的 interim 原文要清掉，否则「同一句短话」会命中
+      // text === lastInterimText 而永不自动收尾
+      lastInterimText = "";
       // 预热的意义就在这里：连接立刻发出，不等第一帧音频
       ensureSocket();
       // 兜底：上一句的「说完了」还没发出去（recorder 没给 stop 事件）就在这里补发，
@@ -559,6 +622,8 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
     stop() {
       // 语义：**这句说完了，还想接着说下一句**。录音停掉 → 收尾音频送出 →
       // 服务的上游被 flush 出 final（浏览器 WS 与麦克风都留着，不用再等 1 秒握手）。
+      clearAutoFinish();
+      lastInterimText = "";
       wantListening = false;
       if (diagnostics.channel === "webspeech") {
         fallback?.stop();
@@ -589,6 +654,8 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
       // 语义：**彻底断开**（页面卸载、切语言、回退到别的通道）。
       // 这里不发 finish_utterance：关 WS 本身就是收尾信号，服务端会先 flush 尾段再收摊，
       // 发两条只会让服务端多做一次无意义的等待。
+      clearAutoFinish();
+      lastInterimText = "";
       wantListening = false;
       if (diagnostics.channel === "webspeech") {
         fallback?.abort();
@@ -609,6 +676,10 @@ export function createDeepgramStt(options: DeepgramSttOptions = {}): DeepgramStt
       if (next === lang) return;
       lang = next;
       fallback?.setLang(next);
+      // 切语言会关掉 socket；旧通道的自动收尾定时器必须一起撤，否则 900ms 后
+      // 会把新通道的会话当成旧会话 stop 掉（审查指出的路径）
+      clearAutoFinish();
+      lastInterimText = "";
       // 语言是上游 URL 的一部分：下次 prewarm/start 会用新语言重连
       closeSocket("lang-change");
     },
