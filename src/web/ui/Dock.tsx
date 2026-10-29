@@ -598,10 +598,10 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
           end();
         }
       }}
-      aria-label="按住说话：按下即打断并进入倾听，松开结束"
-      title="按住说话：按下即打断并进入倾听，松开结束"
+      aria-label="按住说话：按下即打断并进入倾听，松开结束（也可以按住空格）"
+      title="按住说话：按下即打断并进入倾听，松开结束（也可以按住空格）"
     >
-      按住说话
+      按住说话 <kbd>Space</kbd>
     </button>
   );
 }

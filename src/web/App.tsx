@@ -20,6 +20,7 @@ import {
 import { VoiceBargeInWiring } from "./voice/bargeInWiring";
 import { createFakeStt, parseFakeAecOverride, parseFakeSttFlag } from "./voice/fakeStt";
 import { parseBargeInFlag } from "./voice/bargeInFlag";
+import { isPttEnd, isPttStart } from "./ui/pttHotkey";
 import { describeAppliedMicSettings, readAecState, readMicDiagnostics } from "./voice/micConstraints";
 import { logTrace, markTrace, parseTraceFlag, publishTrace, setTraceEnabled } from "./voice/bargeInTrace";
 import { withAudioTrace } from "./voice/tracedTts";
@@ -755,6 +756,57 @@ export function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [store]);
+
+  /**
+   * 全局「按住空格说话」。
+   *
+   * 为什么需要它：按钮上的键盘路径（Dock.tsx 的 onKeyDown）要求按钮**先获得焦点**，
+   * 语音场景里没人会先去 Tab 到按钮 —— 等于没有键盘入口。owner 的用法是「不打字、
+   * 直接说话」，手在空间上随便按下空格就该开始录。
+   *
+   * 边界（见 ui/pttHotkey.ts）：输入框里空格仍是打字、⌘/Ctrl/Alt 组合不抢、
+   * 长按连发不重复启动；抬起一定收尾（焦点丢了也不留永远在录的会话）。
+   */
+  useEffect(() => {
+    let holding = false;
+    const start = (event: KeyboardEvent) => {
+      if (holding || !isPttStart(event)) return;
+      // 抽屉/对话框开着时不接管：那时空格属于对话框
+      if (document.querySelector('[role="dialog"]')) return;
+      event.preventDefault();
+      holding = true;
+      pushToTalkStart();
+    };
+    const end = (event: KeyboardEvent) => {
+      if (!holding || !isPttEnd(event)) return;
+      holding = false;
+      pushToTalkEnd();
+    };
+    // 切窗口 / 页面失焦时不该继续录：没有 keyup 可等，直接收尾
+    const abort = () => {
+      if (!holding) return;
+      holding = false;
+      pushToTalkEnd();
+    };
+    window.addEventListener("keydown", start);
+    window.addEventListener("keyup", end);
+    window.addEventListener("blur", abort);
+    document.addEventListener("visibilitychange", abort);
+    return () => {
+      window.removeEventListener("keydown", start);
+      window.removeEventListener("keyup", end);
+      window.removeEventListener("blur", abort);
+      document.removeEventListener("visibilitychange", abort);
+      // 依赖变了会让本 effect 重挂（pushToTalkStart 依赖 store/tts）：
+      // 这时 holding 随闭包作废，若不在这里收尾，底层录音会一直跑，
+      // 而之后所有 keyup 都因 `!holding` 被丢掉 —— 永久卡在录音态。
+      // Dock 的按钮版有这个兜底（onLostPointerCapture / 卸载），这里必须对称。
+      if (holding) {
+        holding = false;
+        pushToTalkEnd();
+      }
+    };
+  }, [pushToTalkEnd, pushToTalkStart]);
 
   useEffect(() => {
     return () => {
