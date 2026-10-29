@@ -144,6 +144,17 @@ ssh "$HOST" "cd $REMOTE_DIR && bun install --frozen-lockfile 2>&1 | tail -2 && b
 echo "==> 3/5 重启服务"
 ssh "$HOST" "sudo systemctl restart mira-scene && sleep 2 && systemctl is-active mira-scene"
 
+# Caddy 的站点块由 bun-nolo 的 scripts/release/configureCaddyProxy.sh 生成，
+# 那个脚本重写 /etc/caddy/Caddyfile 时**不包含 mira 块** —— 2026-10-29 实测，
+# 它被别的部署跑过一次之后 mira.nolo.chat 整站 000（服务自己还是好的）。
+# 所以每次部署都先自检，缺了就补回来再 reload。
+echo "==> 3.5/5 确保 Caddy 有 mira 站点块"
+ssh "$HOST" 'grep -q "mira.nolo.chat" /etc/caddy/Caddyfile || {
+  cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak-mira-$(date +%s)
+  printf "\nmira.nolo.chat {\n\treverse_proxy 127.0.0.1:8787\n}\n" >> /etc/caddy/Caddyfile
+  caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 && systemctl reload caddy
+}'
+
 echo "==> 4/5 回环自检"
 ssh "$HOST" "curl -s -m 5 -o /dev/null -w 'loopback=%{http_code}\n' http://127.0.0.1:$PORT/api/health"
 

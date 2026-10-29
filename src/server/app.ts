@@ -32,6 +32,12 @@ import {
   type SttBridge,
   type UpstreamConnect,
 } from "./stt.ts";
+import {
+  getActiveModel,
+  handleSttAdminRequest,
+  openRecordingSttBridge,
+} from "./sttAdmin.ts";
+import type { EncoderFactory, StreamingEncoderFactory } from "./aliStt.ts";
 import { createEdgeTtsSynthesizer, type EdgeTtsSynthesizer } from "./edgeTts.ts";
 import { createTtsProxy, createTtsRouter, type TtsProxy } from "./tts.ts";
 import type { EdgeWsClient } from "./edgeTtsWs.ts";
@@ -86,6 +92,10 @@ export interface AppOptions {
   edge?: EdgeTtsSynthesizer;
   /** 上游 STT 建连函数（测试注入假 socket；默认连 wss://api.deepgram.com） */
   sttConnect?: UpstreamConnect;
+  /** 阿里整段路径的转码器工厂（测试注入假的，避免真的 spawn ffmpeg） */
+  sttEncoder?: EncoderFactory;
+  /** 阿里流式路径的转码器工厂（测试注入假的，避免真的 spawn ffmpeg） */
+  sttStreamEncoder?: StreamingEncoderFactory;
   /** 中文的快路径：原生 WS（默认不建 —— 建连由 index.ts 显式做，测试里可以注入假实现） */
   edgeWs?: EdgeWsClient;
 }
@@ -186,8 +196,8 @@ export function createApp(options: AppOptions = {}): App {
       // 任一 provider 配了，语音输入就可用
       stt: deepgram !== null || dashscope !== null,
       tts: tts.configured,
-      // 报**实际在用**的那个模型（阿里优先）
-      sttModel: dashscope ? dashscope.model : STT_MODEL,
+      // 报**实际在用**的那个模型（阿里优先；运行时切换过就报切换后的那个）
+      sttModel: dashscope ? (getActiveModel() ?? dashscope.model) : STT_MODEL,
       // 中文可用 = CLI 探到了 或者 原生 WS 配了（两者任一都能出声）
       ttsZh: tts.routes?.chinese ?? edge.available,
       // 能力上报：阿里整段识别**不发** speech_started → 客户端改走 energy VAD
@@ -219,9 +229,28 @@ export function createApp(options: AppOptions = {}): App {
   const openSttStream: App["openSttStream"] = (sink, opts) => {
     // 两个 provider 都没配 → 没有语音输入（门禁会先回 503）
     if (!deepgram && !dashscope) return null;
+    if (dashscope) {
+      // **建会话这一刻**定下用哪个模型：运行时切过的优先，没切过用配置里的默认。
+      // 切换只影响**新开的**会话 —— 正在说的那句不中途换模型。
+      const model = getActiveModel() ?? dashscope.model;
+      return openRecordingSttBridge({
+        sink,
+        model,
+        open: (recordingSink) =>
+          createSttBridge({
+            config: deepgram,
+            dashscope: { ...dashscope, model },
+            connect: sttConnect,
+            sink: recordingSink,
+            lang: opts?.lang,
+            format: opts?.format,
+            encoder: options.sttEncoder,
+            streamEncoder: options.sttStreamEncoder,
+          }),
+      });
+    }
     return createSttBridge({
       config: deepgram,
-      dashscope,
       connect: sttConnect,
       sink,
       lang: opts?.lang,
@@ -287,6 +316,14 @@ export function createApp(options: AppOptions = {}): App {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsFor(origin) });
     }
+
+    // 运行时 ASR 切换后台（/admin 页面 + /api/stt/admin/config）。
+    // 没配 ADMIN_TOKEN 时它整套 404（fail-closed）—— 处理函数自己返回 null 表示「不是后台的请求」。
+    const adminResponse = await handleSttAdminRequest(request, url, {
+      adminToken: config.adminToken,
+      defaultModel: dashscope ? dashscope.model : STT_MODEL,
+    });
+    if (adminResponse) return adminResponse;
 
     if (path === "/api/health") {
       if (request.method !== "GET") return json({ error: "method not allowed" }, 405, origin);

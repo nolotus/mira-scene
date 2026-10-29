@@ -154,6 +154,14 @@ export interface ServerConfig {
   llmMode: LlmMode;
   /** 开发模式放行 CORS 的前端源 */
   devOrigins: readonly string[];
+  /**
+   * 运行时 ASR 切换后台的管理 token（`ADMIN_TOKEN`）。
+   *
+   * null = **未配置** = 后台整套路由一律 404（fail-closed，站点是公开的，
+   * 「忘了配 token」必须等于「这个后台不存在」，而不是「谁都能进」）。
+   * token 只在内存里比对，不进日志、不进响应体。
+   */
+  adminToken: string | null;
 }
 
 export const DEFAULT_PORT = 8787;
@@ -278,5 +286,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     llmStruct: resolveLlmStructMode(env),
     llmMode: resolveLlmMode(env),
     devOrigins: ["http://localhost:5173", "http://127.0.0.1:5173"],
+    adminToken: trimToNull(env.ADMIN_TOKEN),
   };
 }

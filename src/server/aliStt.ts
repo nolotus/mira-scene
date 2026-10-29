@@ -247,12 +247,13 @@ export function aliStreamParameters(): Record<string, unknown> {
 /**
  * 这个模型名是不是走**真流式**路径。
  *
- * 判定规则：显式等于流式模型，或名字里带 "streaming"。
+ * 判定规则：显式等于流式模型，或名字里带 "streaming" / "realtime"
+ * （`fun-asr-realtime-*` 也是流式模型 —— 它只是不叫 streaming）。
  * 没给模型名 = 默认流式（配置里 `ALI_ASR_MODEL` 的默认值就是它）。
  */
 export function isStreamingAsrModel(model: string | null | undefined): boolean {
   if (!model) return true;
-  return model === ALI_ASR_MODEL || model.includes("streaming");
+  return model === ALI_ASR_MODEL || model.includes("streaming") || model.includes("realtime");
 }
 
 /** 收尾请求：告诉上游「音频发完了，出终稿」 */
