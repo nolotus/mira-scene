@@ -353,6 +353,22 @@ export class LiveDirector implements Director {
         console.warn(
           `[director:live] payload invalid turn=${input.turnId} raw=${rawAll.length}chars emitted=${emitted.length}chars`,
         );
+        // **保证一定回话**（Sol 稳定性方案的第一层）：
+        // 这一轮一个字都没发出去 → 用一句产品预审过的固定接话走正常字幕+TTS 管道，
+        // 不带任何动作。它不是「清洗那 52 字」（那可能夹带控制内容），而是独立构造的
+        // 可信台词。宁可她说一句「再跟我说一句」，也不能什么都不给。
+        // 已经发出过 text.delta 的轮次**不**这样做：声音无法撤回，重来会双播/自相矛盾。
+        if (emitted.length === 0) {
+          const fallback = FALLBACK_LINE.slice(0, MAX_SAY_CHARS);
+          console.warn(`[director:live] fallback replied turn=${input.turnId}`);
+          for (const piece of chunkText(fallback)) {
+            if (signal.aborted) return;
+            emitted += piece;
+            spoken += charCount(piece);
+            yield { type: "text.delta", turnId: input.turnId, epoch: input.epoch, text: piece };
+            await sleep(LIVE_CHUNK_DELAY_MS, signal);
+          }
+        }
         return;
       }
 
@@ -385,6 +401,20 @@ export class LiveDirector implements Director {
           droppedDirective: Math.max(payload.dropped.directive, scanned.droppedDirective),
           struct: decision,
         };
+      }
+
+      // 另一个零输出路径：JSON 合法但 say 为空（例如只给了 cues）。
+      // 同样是「用户说完话却什么都没有」，一样要给可信接话。
+      if (emitted.length === 0) {
+        const fallback = FALLBACK_LINE.slice(0, MAX_SAY_CHARS);
+        console.warn(`[director:live] fallback replied turn=${input.turnId} reason=empty-say`);
+        for (const piece of chunkText(fallback)) {
+          if (signal.aborted) return;
+          emitted += piece;
+          spoken += charCount(piece);
+          yield { type: "text.delta", turnId: input.turnId, epoch: input.epoch, text: piece };
+          await sleep(LIVE_CHUNK_DELAY_MS, signal);
+        }
       }
     } catch (error) {
       if (signal.aborted) return;
@@ -444,6 +474,12 @@ const DONE = Symbol("sse-done");
 
 /** 提示词要求 say ≤90 字；模型违约时留一倍余量后强行截断，防止无限吐 */
 const MAX_SAY_CHARS = 180;
+/**
+ * 违约且零输出时的**可信接话**：独立构造，不是从模型输出里捞取。
+ * 目的只有一个 —— 用户说完话后永远能得到回应，而不是「看见自己的字幕、她却不响」。
+ */
+const FALLBACK_LINE =
+  "嗯，我在。刚才有点走神，你再说一句好不好？";
 /**
  * 结构性字段名：模型输出不合法（单引号/漏引号）时用它当停止标记。
  * 必须覆盖当前提示词用到的每一个字段名——旧格式 `directives`、新格式 `cues`。

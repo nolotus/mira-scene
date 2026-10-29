@@ -285,7 +285,7 @@ describe("LiveDirector · 纯文本叙述（不带 JSON）", () => {
 
   test("散装/无括号的结构痕迹：整段丢弃，不许放行", async () => {
     // 这些形态**没有可救的 say**：解析器返回 null，必须整段丢弃。
-    // 断言用 toBe("") 而不是 not.toContain —— 后者在「放行前半句」时会假绿（审查指出）。
+    // 契约：脏内容绝不进字幕，但这一轮**必须有回应**（零输出由服务端给可信接话）。
     for (const dirty of [
       "哦，听错了。!'directives': [{'kind':'emotion'}]}",
       '废话一句 {"cues":[{"atChar":3}]}',
@@ -305,7 +305,10 @@ describe("LiveDirector · 纯文本叙述（不带 JSON）", () => {
           events.push(event);
         }
         const text = events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
-        expect(text).toBe("");
+        expect(text).not.toContain("directives");
+        expect(text).not.toContain("cues");
+        expect(text).not.toContain("kind");
+        expect(text.length).toBeGreaterThan(0);
         expect(events.filter((e) => e.type === "error")).toEqual([]);
       } finally {
         globalThis.fetch = original;
@@ -329,6 +332,32 @@ describe("LiveDirector · 纯文本叙述（不带 JSON）", () => {
       expect(text).toBe("台词");
       expect(events.filter((e) => e.type === "directive")).toEqual([]);
       expect(events.filter((e) => e.type === "error")).toEqual([]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
+describe("LiveDirector · 零输出兜底（保证一定回话）", () => {
+  test("模型吐非 JSON 且一个字都没发出 → 必须给出可信接话，且不带动作", async () => {
+    const dirty = "哦，听错了。!'directives': [{'kind':'emotion'}]}";
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse(dirty.match(/[\s\S]{1,6}/g) ?? [dirty])) as unknown as typeof fetch;
+    try {
+      const director = new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 });
+      const events: SessionEvent[] = [];
+      for await (const event of director.stream(liveInput, new AbortController().signal)) {
+        events.push(event);
+      }
+      const text = events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
+      // 保证有回应
+      expect(text.length).toBeGreaterThan(0);
+      // 但绝不把脏内容当台词
+      expect(text).not.toContain("directives");
+      expect(text).not.toContain("kind");
+      // 兜底句不带动作
+      expect(events.filter((e) => e.type === "directive")).toEqual([]);
     } finally {
       globalThis.fetch = original;
     }
