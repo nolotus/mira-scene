@@ -155,6 +155,25 @@ describe("store：canInterrupt 必须包含「音频还在响」这条腿", () =
   });
 });
 
+describe("store：audioPlaying 探针抛错不能把界面带崩", () => {
+  test("探针抛错 → canInterrupt 退回状态机判据，且 getSnapshot 不抛", async () => {
+    const api = new FakeApi();
+    const tts = new FakeTts();
+    const store = new SessionStore({
+      api,
+      tts,
+      audioMode: "stream",
+      audioPlaying: () => {
+        throw new ReferenceError("Cannot access 'presenceRef' before initialization");
+      },
+    });
+    await store.init();
+    expect(() => store.getSnapshot()).not.toThrow();
+    expect(store.getSnapshot().canInterrupt).toBe(false);
+    expect(() => store.onUserSpeech("button")).not.toThrow();
+  });
+});
+
 describe("store：垫音（filler）的让位时机", () => {
   function spyFiller() {
     const calls = { play: 0, stop: 0 };

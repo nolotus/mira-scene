@@ -167,6 +167,10 @@ export function App() {
     () => withAudioTrace(withDemoTts(nativeTts, demo)),
     [nativeTts, demo],
   );
+  // 必须在 store 之前声明：SessionStore 构造时就会 emit() → buildView() → audioPlaying()
+  // 会立刻读它，声明在后会踩 TDZ（Cannot access 'presenceRef' before initialization → 黑屏）
+  const presenceRef = useRef(createPresenceArbiter());
+
   const store = useMemo(
     () =>
       new SessionStore({
@@ -206,7 +210,6 @@ export function App() {
     () => parsePresenceTraceFlag(typeof window === "undefined" ? "" : window.location.search),
     [],
   );
-  const presenceRef = useRef(createPresenceArbiter());
   const traceRef = useRef<PresenceTrace | null>(null);
   if (traceOn && traceRef.current === null) traceRef.current = createPresenceTrace();
   const signalsRef = useRef({

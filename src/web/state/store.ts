@@ -451,7 +451,7 @@ export class SessionStore {
       busy: this.machine.turnActive,
       // 与 onUserSpeech 同一条判据：Esc / 打断按钮与「按住说话」不能有两套标准。
       // turn.end 之后状态已 idle、但缓冲音频还在响的窗口里，canInterrupt 必须仍为 true。
-      canInterrupt: needsBargeIn(this.machine) || this.deps.audioPlaying?.() === true,
+      canInterrupt: needsBargeIn(this.machine) || this.audioIsPlaying(),
       lastUserText: this.lastUserText,
       lastBargeIn: this.lastBargeIn,
       ttsName: this.deps.tts.name,
@@ -755,11 +755,35 @@ export class SessionStore {
     this.emit();
   }
 
+  /**
+   * 音频探针的安全包装：`audioPlaying` 是外部注入的回调（App 里读 presence），
+   * 它一旦抛错（例如声明顺序问题导致的 TDZ），绝不能把 buildView/事件处理整条链带崩
+   * —— 2026-10-29 真踩过：引用提前于初始化，App 直接黑屏。
+   *
+   * 失败时只降级为 false（退回状态机判据），但**告警一次**：否则以后真正的探针 bug
+   * 会表现为「打断偶尔失灵」而没有任何线索。
+   */
+  private audioIsPlaying(): boolean {
+    if (this.audioProbeBroken) return false;
+    try {
+      return this.deps.audioPlaying?.() === true;
+    } catch (err) {
+      this.audioProbeBroken = true;
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[barge-in] audioPlaying 探针抛错，退回状态机判据：${message}`);
+      obsEvent("error", { detail: { message: `audioPlaying probe failed: ${message}` } });
+      return false;
+    }
+  }
+
+  /** 探针已确认坏掉：只告警一次，之后直接降级，不再每次事件都刷日志 */
+  private audioProbeBroken = false;
+
   /** VAD / 麦克风检测到用户开口 */
   onUserSpeech(reason: BargeInReason = "speech"): void {
     // 状态机说「在说」或者**音频确实还在响**都算可打断：后者覆盖 turn.end 之后
     // 缓冲仍在播完的窗口（真机上最容易「按了没反应」的那一段）
-    if (needsBargeIn(this.machine) || this.deps.audioPlaying?.() === true) {
+    if (needsBargeIn(this.machine) || this.audioIsPlaying()) {
       this.interrupt(reason);
       return;
     }
