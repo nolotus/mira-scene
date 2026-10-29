@@ -717,7 +717,10 @@ export function App() {
     stopEnergyVad,
   ]);
 
+  const [pttHolding, setPttHolding] = useState(false);
+
   const pushToTalkStart = useCallback(() => {
+    setPttHolding(true);
     warmUpTts(tts);
     const stt = sttRef.current;
     if (stt?.supported) {
@@ -730,6 +733,7 @@ export function App() {
   }, [store, tts]);
 
   const pushToTalkEnd = useCallback(() => {
+    setPttHolding(false);
     sttRef.current?.stop();
   }, []);
 
@@ -880,6 +884,7 @@ export function App() {
           onSend={send}
           onInterrupt={() => store.interrupt("button")}
           onMicToggle={() => void toggleMic()}
+          pttHolding={pttHolding}
           onPushToTalkStart={pushToTalkStart}
           onPushToTalkEnd={pushToTalkEnd}
           onRetry={retry}
