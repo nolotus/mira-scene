@@ -278,8 +278,11 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                   </linearGradient>
                   {/* 袖子出画渐隐：袖口不再是「平口截断」（那读作断肢），
                       而是从 y≈468 起逐渐透明，读作小臂继续往画面外延伸 */}
-                  <linearGradient id="mx-arm-fade" gradientUnits="userSpaceOnUse" x1="200" y1="468" x2="200" y2="566">
+                  <linearGradient id="mx-arm-fade" gradientUnits="userSpaceOnUse" x1="200" y1="452" x2="200" y2="536">
+                    {/* 452（全显）→ 536（全隐）：审查指出原来 468→566 在 y=536 仍有 31% 不透明，
+                        会留一圈「鬼影边」。收紧后袖口在画面内就淡干净了。 */}
                     <stop offset="0" stopColor="#ffffff" />
+                    <stop offset="0.55" stopColor="#9a9a9a" />
                     <stop offset="1" stopColor="#000000" />
                   </linearGradient>
                   <mask id="mx-arm-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="400" height="560">
