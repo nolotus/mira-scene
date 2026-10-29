@@ -30,7 +30,7 @@
 ### 04 四种角色状态
 - **实现依据**：`src/web/stage/visuals.ts` 的 `STATUS_SPEC` 明确定义 idle/listening/thinking/speaking 的位置、头部朝向、视线、呼吸；`src/web/state/presence.ts` 用 request/TTS/mic 仲裁可见状态；`src/web/App.tsx` 将仲裁后的状态传入 Stage；`src/web/stage/Stage.tsx` 将状态反映为 data-status 和 HUD。
 - **OPT-008 · P2 · 待验证**：浏览器真机或 E2E 逐态截图与录屏，确认四态不仅存在，而且用户一眼可辨认；特别检查 thinking→speaking、说话句间、打断→listening 的转换。比较口型和真实音频时间线，避免只按状态枚举判定通过。位置：`src/web/state/presence.ts`、`src/web/stage/visuals.ts`、`src/web/stage/Character.tsx`、`src/web/stage/Stage.tsx`。
-- **OPT-009 · P3 · 待验证**：默认 SVG 与 `?char=photo` 两种角色模式分别检查四态视觉可辨性，避免照片模式与默认模式不一致。位置：`src/web/stage/Stage.tsx`、`src/web/stage/characters/PhotoCharacter.tsx`。
+- **OPT-009 · 已关闭（2026-10-29）**：照片级角色整条删除（commit `343e3db`：`PhotoCharacter.tsx`、`photoRig/photoGrade/photoStage/portraitSpec/portraitRuntime`、`public/char/` 素材全部移除），`?char=photo` 变成未知参数被静默忽略。四态视觉只需在 SVG 单模式下验收，原「两模式不一致」风险随之消失。
 
 ## 验证原则
 1. 分开标注：已确认缺陷、静态代码风险、真机待验证；未跑过的不写成「已测通过」。
@@ -56,7 +56,7 @@
 - **OPT-010 · P1 · 缺独立真机证据**：使用 Android Chrome + iOS Safari 真麦克风、系统扬声器验证 06–15；每轮覆盖输入、STT interim/final、TTS 真正出声、边说边打断、停声、旧字幕与媒体不恢复。记录设备/系统/浏览器、时序与视频。代码：`src/web/state/store.ts`、`src/web/voice/`。项目 `coverage.md` 已明确真机尚待验。
 - **OPT-011 · P1 · 交付缺口**：制作并检查符合 PDF 的 3–5 分钟正式录屏（至少含正常交互、角色变化、说话时打断、多模态媒体、失败降级）。仓库 `coverage.md` 明确称正式录屏尚未找到。录屏属于交付物，并非 01–29 功能条目。
 - **OPT-012 · P2 · 视觉实测缺口**：对 16–23 提供基于真实会话的可复现视觉证据（3 情绪、2 非说话动作、背景/镜头变化、随对话触发的明显事件及媒体四态）。现有覆盖报告说明瞬态图像探针提前停止，未把视觉变化全部判通过。
-- **OPT-013 · P2 · 文档一致性**：`docs/coverage.md` 声称 `?char=photo` 已于 2026-10-29 删除，但本次读到的 `Stage.tsx` 仍导入 `PhotoCharacter` 且 `?char=photo` 分支仍在。核对最新分支/提交、部署版本和 README 描述；不要在未核准前删除代码。
+- **OPT-013 · 已关闭（2026-10-29）**：成因是审查读到的代码版本早于删除提交。以 `343e3db` 为准：`Stage.tsx` 已无 `PhotoCharacter`/`parseCharFlag` 分支，无条件渲染 `<Character>`；全仓无指向已删模块的 import。文档与代码现已一致。
 - **OPT-014 · P2 · 测试稳定性**：覆盖矩阵承认 `bargeInSingleSource.test.ts` 在全量并发下偶发失败；补稳定可重复的时序模拟/条件等待，CI 单独记录并发与串行结果，避免因分批全绿掩盖 flake。
 - **OPT-015 · P3 · 真模型演示链路**：录制至少一次带凭据的 live director → STT → TTS 完整回合的脱敏诊断；不提交 key。Mock 符合无密钥要求，但正式演示需要区分 Mock 与 live 的实际能力。
 - **OPT-016 · P3 · 不扩大范围**：当前 PDF ⑤ 只需四选一，序列帧可满足；不要为验收临时扩建视频生成、复杂人物一致性或通用动画框架。
@@ -93,4 +93,16 @@ P1：正式录屏 / 真机双向语音与打断 / 软键盘可用性 → P2：�
 
 **建议优先级**：真实语音打断与同步 > 事件隔离回归（OPT-017）> 完整演示录屏 > 会话可回放性 > 其它可选功能。避免把可选能力的缺失误判为必做未完成。
 
-**文档口径提醒**：`docs/coverage.md` 关于 `?char=photo` 分支删除的记载与更早读取到的代码版本存在时间差；本轮再次读取 `Stage.tsx` 已没有该分支，表明默认分支可能已更新。OPT-013 应改为对照具体 commit 与部署版本，而非认定当前代码始终存在分支。
+**文档口径提醒（2026-10-29 更新）**：已按具体 commit 核实——`343e3db` 删除了照片级角色，`Stage.tsx` 不再有 `?char=photo` 分支。今后遇到「文档说改了、代码里还在」的分歧，一律先 `git log -S` 定位改动提交，再判断是版本时间差还是文档写错。
+
+## 后续变更对本文的影响（2026-10-29 晚）
+
+以下改动发生在本文初稿之后，已在上文逐条标注关闭；此处汇总口径，避免两套结论并存：
+
+- **照片级角色整条删除**（`343e3db`）：写实人像 + 程序化嘴眼贴片掉进恐怖谷，调色/羽化/情绪档位/景别都救不回来。只保留 SVG 分层版；`public/char/` 与 7 个源码文件、6 个测试文件一并移除。
+- **静音收尾按句末标点自适应**（`3fd82bf`）：带 `。？！…` 时 450ms 收尾，长句仍 900ms；实测真模型 firstText 中位数约 1.0–1.5s，缩 prompt / 减 history 均无效果，不作为优化方向。
+- **垫音**（`7d02444`）：发送瞬间先出一声「嗯」（约 0.45s，用本应用同音色生成），首个 `text.delta`/`audio.chunk` 到达即让位，主观等待基本消失。
+- **模型通道**：本地与线上均已切官方 `deepseek-chat`（首字 963–1076ms；lithos 为 1118–1304ms 且尾部到 2799ms）。线上 `/etc/mira-scene.env` 只能用明文 key（服务器没有本地凭据 broker），本地 `.env.local` 可以用 nolo 的 vault 凭证引用。
+- **打断判据补「音频真的在响」**：`turn.end` 之后缓冲仍在播放的窗口里，「按住说话」原本判不出可打断。
+- **线上事故记录**：`docs/deploy.md` 3.5 步记的 Caddy mira 块被其他部署脚本抹掉的坑，2026-10-29 再次复现（整站 000），已按文档补回并 reload。
+
