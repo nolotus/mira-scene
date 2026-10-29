@@ -32,10 +32,10 @@
 |---|---|---|
 | Bun | 运行时 | `bun --version` |
 | Chrome | 麦克风 + `webkitSpeechRecognition` 回退 + AEC | — |
-| edge-tts | 中文 TTS 的角色音色（不需要 key，但需要这个 CLI） | `edge-tts --version` |
+| edge-tts（可选回退） | 中文 TTS 三级链是 **原生 WS → `edge-tts` CLI → 浏览器 TTS**：不装 CLI 一般也能出声（原生 WS 走热连接，实测 287ms），只有原生那条挂了才会用到它 | `edge-tts --version`（没有也能跑） |
 | Deepgram key | 中文语音识别（`nova-2`） | 见下 |
 
-装 edge-tts（Mac）：
+装 edge-tts（可选回退，Mac）：
 
 ```bash
 pip3 install --user edge-tts      # 通常落在 ~/Library/Python/3.x/bin/edge-tts
@@ -205,5 +205,5 @@ sudo systemctl restart mira-scene
 | 首句声音要等 1–1.5s，后面就快了 | Edge WebSocket 空闲 15s 自动关闭（`WS_IDLE_CLOSE_MS`），每次重连要重新握手 | 已知待优化项；用 `?obs=1` 看 `TTS TTFB` |
 | 说话时她不打断 | 读不到 AEC → `source=none` | 换一台能上报 `echoCancellation: true` 的机器外放 |
 | 说完到出终稿约 1.1s | Deepgram `endpointing` 300ms + 上游缓冲 | 已知项，字幕会停在最后一条 interim |
-| 部署后第一句话走系统音 | `/api/voice/status` 首次探测 `edge-tts --version` 比首字慢 | 看 `?obs=1` 的 `status:ready` 事件耗时 |
+| 部署后第一句话走系统音 | 原生 WS 没成（握手失败 / 未配置）→ 先退 `edge-tts` CLI，CLI 也没有或也失败才回浏览器 TTS；旧版还叠加 `edge-tts --version` 探测耗时 | 看 `?obs=1` 的 `status:ready` 与 `/api/voice/status` 里的 `ttsNative.offReason` |
 | 重连后会话 id 变成孤儿 | 重连会新建会话，旧 sessionId 不再使用 | 已知副作用，见 README 已知问题 |

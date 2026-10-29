@@ -11,7 +11,7 @@ export interface VoiceStatus {
   /** Deepgram key 是否配置（英文合成 + 语音识别） */
   tts: boolean;
   sttModel: string;
-  /** 本地 `edge-tts` CLI 是否可用（中文合成；服务端启动时探测一次） */
+  /** 中文合成是否可用：原生 WS 配好了**或**本地 `edge-tts` CLI 探到了（任一就能出声） */
   ttsZh: boolean;
   /**
    * 上游**会不会**发 `speech_started`（默认 true = 会发）。
