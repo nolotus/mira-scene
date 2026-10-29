@@ -1,4 +1,3 @@
-import { createFillerPlayer } from "./voice/filler";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Stage } from "./stage/Stage";
 import { reportSessionSignal } from "./stage/clip/clipBus";
@@ -177,8 +176,6 @@ export function App() {
         api,
         tts,
         audioMode: boot.audio,
-        // 垫音：发送瞬间先「嗯」一声，真实语音一到就让位（见 voice/filler.ts）
-        filler: createFillerPlayer(),
         // 「音频真的在响」——打断判据的第二条腿，见 SessionStoreDeps.audioPlaying
         audioPlaying: () => presenceRef.current.get().mouthDrive,
       }),
