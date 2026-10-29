@@ -425,8 +425,11 @@ describe("静音自动收尾：接线（不只是纯函数）", () => {
     h.socket.open();
     h.socket.emit({ type: "interim", text: "外面还在下雨吗？" });
     expect(h.recorder.stopped).toBe(0);
-    await Bun.sleep(SENTENCE_WAIT);
-    // 这条断言就是核心收益：如果实现退回固定 900ms，这里会仍是 0
+    // 650ms：短阈值（750）还没到 → 必须仍是 0
+    await Bun.sleep(Math.max(200, AUTO_FINISH_SENTENCE_MS - 100));
+    expect(h.recorder.stopped).toBe(0);
+    // 850ms：越过 750、未到默认 900 → 必须已经收尾（把 750 改回 450 或删掉短阈值都会让这条 fail）
+    await Bun.sleep(250);
     expect(h.recorder.stopped).toBe(1);
     stt.abort();
   });
@@ -477,6 +480,13 @@ describe("静音自动收尾的阈值自适应", () => {
     for (const text of ["我想说的是", "你今天晚上", "雨好像小了一点点但"]) {
       expect(autoFinishDelayMs(text)).toBe(AUTO_FINISH_QUIET_MS);
     }
+  });
+
+  test("边界与标点族：正好 6 字走短阈值；…、．、ASCII . 都算句末", () => {
+    expect(autoFinishDelayMs("我们吃饭吧。")).toBe(AUTO_FINISH_SENTENCE_MS); // 正好 6 字
+    expect(autoFinishDelayMs("外面还在下雨吗…")).toBe(AUTO_FINISH_SENTENCE_MS);
+    expect(autoFinishDelayMs("外面还在下雨吗．")).toBe(AUTO_FINISH_SENTENCE_MS);
+    expect(autoFinishDelayMs("is it raining.")).toBe(AUTO_FINISH_SENTENCE_MS);
   });
 
   test("句内停顿不算句子结束", () => {
