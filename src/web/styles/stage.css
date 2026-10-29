@@ -2105,7 +2105,9 @@
 }
 
 /* 按住说话：按下期间必须看得出来「在录」（此前完全没有反馈，用户不知道有没有按住） */
-.mira-btn--ptt[data-holding="true"] {
+/* 特异性必须压过 .mira-btn:hover:not(:disabled)（(0,3,0)），否则按住时琥珀底被 hover 的
+   半透明白盖掉、而深色文字仍然生效 → 变成近黑字深底，标签几乎不可读（审查实测） */
+.mira-btn.mira-btn--ptt[data-holding="true"]:not(:disabled) {
   background: #f2b45c;
   color: #1a1208;
   border-color: #f2b45c;

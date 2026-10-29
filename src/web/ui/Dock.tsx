@@ -542,7 +542,6 @@ interface PushToTalkProps {
  */
 function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
   const holdingRef = useRef(false);
-  const startedAtRef = useRef(0);
   /** 按下期间用于视觉反馈：没有它用户不知道到底开没开始录 */
   const [holding, setHolding] = useState(false);
 
@@ -559,7 +558,6 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
     event.preventDefault();
     if (holdingRef.current) return;
     holdingRef.current = true;
-    startedAtRef.current = Date.now();
     setHolding(true);
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -584,6 +582,8 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
       onPointerDown={start}
       onPointerUp={end}
       onPointerCancel={end}
+      // 浏览器丢失指针捕获时不一定会补发 pointerup；没有这条，录音会永久「按住」
+      onLostPointerCapture={end}
       onContextMenu={(event) => event.preventDefault()}
       onKeyDown={(event) => {
         // 键盘可达：空格/回车按下即开始，抬起即结束（读屏与键盘用户此前只能看到按钮但按了没反应）
