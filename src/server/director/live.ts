@@ -329,7 +329,11 @@ export class LiveDirector implements Director {
         // 只有在**完全没有 JSON 结构痕迹**时才把原文当台词放行；一旦出现
         // `{` / `]` / "say" / directives / cues 这类结构字样就照旧整段丢弃 ——
         // 那类残段正是当初把 `'directives':[…]` 漏进字幕的来源。
-        const hasStructure = /[{}[\]]|"say"|'say'|directives|cues/i.test(plain);
+        // 结构痕迹：括号、任何引号包起来的 say（含全角）、散装的 say/directives/cues/kind
+        // （`say:` / `say：` / `kind: 'emotion'` 这类无括号散装指令也必须拦住 ——
+        // 审查实测最初的正则会被 `“say”`、裸 `say:`、`kind:` 绕过）
+        const hasStructure =
+          /[{}[\]]|["'“‘]say["'”’]|(?:^|\b)(?:say|directives|cues|kind)(?:\b|[:：])/i.test(plain);
         if (plain && !hasStructure) {
           const text = plain.slice(0, MAX_SAY_CHARS);
           console.warn(

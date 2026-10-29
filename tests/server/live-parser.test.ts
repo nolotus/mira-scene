@@ -283,11 +283,17 @@ describe("LiveDirector · 纯文本叙述（不带 JSON）", () => {
     }
   });
 
-  test("带任何 JSON 结构痕迹的残段仍然整段丢弃（不许放行）", async () => {
+  test("散装/无括号的结构痕迹：整段丢弃，不许放行", async () => {
+    // 这些形态**没有可救的 say**：解析器返回 null，必须整段丢弃。
+    // 断言用 toBe("") 而不是 not.toContain —— 后者在「放行前半句」时会假绿（审查指出）。
     for (const dirty of [
-      '{"say": "台词", "directives": [',
       "哦，听错了。!'directives': [{'kind':'emotion'}]}",
       '废话一句 {"cues":[{"atChar":3}]}',
+      // 审查实测的漏网形态：全角引号、裸 say、散装 kind
+      '“say”: “雨下大了”',
+      'say: 雨下大了',
+      'say：雨下大了',
+      "kind: 'emotion', name: 'smile'",
     ]) {
       const original = globalThis.fetch;
       globalThis.fetch = (async () =>
@@ -299,12 +305,32 @@ describe("LiveDirector · 纯文本叙述（不带 JSON）", () => {
           events.push(event);
         }
         const text = events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
-        expect(text).not.toContain("directives");
-        expect(text).not.toContain("cues");
+        expect(text).toBe("");
         expect(events.filter((e) => e.type === "error")).toEqual([]);
       } finally {
         globalThis.fetch = original;
       }
+    }
+  });
+
+  test("say 完整、尾巴截断（directives 未闭合）→ 照旧救出台词，只是丢动作", async () => {
+    // 这是解析器的既有能力，不能因为本轮收紧正则而被误伤。
+    const dirty = '{"say": "台词", "directives": [';
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse(dirty.match(/[\s\S]{1,6}/g) ?? [dirty])) as unknown as typeof fetch;
+    try {
+      const director = new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 });
+      const events: SessionEvent[] = [];
+      for await (const event of director.stream(liveInput, new AbortController().signal)) {
+        events.push(event);
+      }
+      const text = events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
+      expect(text).toBe("台词");
+      expect(events.filter((e) => e.type === "directive")).toEqual([]);
+      expect(events.filter((e) => e.type === "error")).toEqual([]);
+    } finally {
+      globalThis.fetch = original;
     }
   });
 });
