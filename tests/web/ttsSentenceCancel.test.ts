@@ -189,6 +189,19 @@ describe("句子级取消", () => {
     expect(started.length).toBe(1);
   });
 
+  test("打断时丢掉残句：半句不能被下一轮首句拼进去", async () => {
+    const { tts, calls } = makeTts();
+    tts.speak("外面还在下"); // 没有句号 → 残句留在 buffer
+    await tick();
+    tts.cancelSentence();
+    const before = calls.length;
+    tts.speak("你今晚一个人吗。");
+    await tick();
+    const requested = calls.slice(before).map((c) => String(c.text ?? ""));
+    expect(requested.some((t) => t.includes("外面还在下"))).toBe(false);
+    expect(requested.some((t) => t.includes("你今晚一个人吗"))).toBe(true);
+  });
+
   test("整轮 cancel 同样中止在飞请求（老语义不回退）", async () => {
     const { tts, calls } = makeTts();
     tts.speak("外面还在下雨吗。");

@@ -1012,6 +1012,10 @@ export class RoutedTTS implements TTSProvider {
    * 不受影响 —— 这是它与 `cancel()` 的唯一区别，也是它比 `cancel()` 更安全的地方。
    */
   cancelSentence(): void {
+    // 残句也必须丢掉：她说到半句时用户打断，buffer 里留着「最后一个句号之后的半句」，
+    // 不清就会被下一轮首句拼成一句（审查 2026-10-29 指出）
+    this.buffer = "";
+
     // ① 当前这句立刻停
     this.browser?.cancel();
     this.stream?.cancel();

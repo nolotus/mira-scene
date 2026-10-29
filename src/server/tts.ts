@@ -416,6 +416,13 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
     } catch (error) {
       const kind = error instanceof EdgeWsError ? error.kind : "error";
       const ms = Math.round(performance.now() - started);
+      // **用户取消不是故障**：打断时这一路多半正在等首块，中止被当成 native 失败会触发
+      // disableNative —— 那是进程级永久关闭（之后所有句子退到 CLI），一次打断就把原生
+      // TTS 打死，还会把「用户点打断」记成上游故障（审查 2026-10-29 指出）。
+      if (signal?.aborted || kind === "aborted") {
+        log(`[tts] route=zh native=aborted ${ms}ms（用户取消，不关原生）`);
+        return null;
+      }
       log(`[tts] route=zh native=fail kind=${kind} ${ms}ms`);
       disableNative(kind, ` ${ms}ms`);
       return null;
