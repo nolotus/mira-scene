@@ -7,7 +7,8 @@
 > 打断的**主路径是「打断」按钮 / Esc 键 / 直接打字**这三种人工触发；「开口即打断」的能量 VAD 只是**实验特性**（外放时会被她自己的声音干扰，已加回声守卫，见「已知问题」）。
 
 > 这是 72 小时 take-home 的实现。设计取舍、已知问题与下一步演进都写在本文件里，没有藏着。
-> 演示地址：<https://mira.nolo.chat>（Mock 导演，零密钥，打开即用）
+> 仓库：<https://github.com/nolotus/mira-scene>
+> 演示地址：<https://mira.nolo.chat>（口令 `mira2026`，输入一次保留 30 天；默认 Mock 导演，加 `?director=live` 走真模型）
 > 演示脚本：[`docs/demo-script.md`](docs/demo-script.md)　AI 使用说明：[`AI_USAGE.md`](AI_USAGE.md)
 > 换一台机器跑起来 / 部署上线 / 对着麦克风测打断：[`docs/deploy.md`](docs/deploy.md)
 
@@ -24,6 +25,8 @@
 **技术选择与取舍**：移动端优先采用单舞台 + 底部交互栏；以 SVG/CSS 角色和 12 帧 spritesheet 完成有限时间内可控的表演与媒体生命周期；以 SSE、`epoch + turnId` 与取消机制处理打断；以 Mock 提供零密钥演示。**没有为加分而扩建**通用角色资产框架、长视频生成或完整游戏系统。真语音/生成式服务依赖配置与外部环境，具体能力、降级边界和已知问题见下文。
 
 ## 快速开始
+
+> 线上演示站带访问口令（防止公开站被刷额度）：输入 `mira2026` 一次即可。口令只作用于线上，本地 `bun run dev` 不需要。
 
 ```bash
 bun install
