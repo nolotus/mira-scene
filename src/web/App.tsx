@@ -145,6 +145,7 @@ export function App() {
   const nativeTts = useMemo(
     () =>
       createVoiceTts({
+        synchronized: boot.audio !== "stream",
         mode: boot.audio,
         lang: boot.lang,
         onSegment: (text: string) => {
@@ -275,10 +276,10 @@ export function App() {
   // 口型/画面用的状态：status 取仲裁结果（而不是事件流推导值），其余字段原样透传
   const stageState = useMemo(
     () =>
-      view.scene.characterStatus === presence.status
-        ? view.scene
-        : { ...view.scene, characterStatus: presence.status },
-    [view.scene, presence.status],
+      nativeTts.synchronized
+        ? { ...view.scene, characterStatus: view.playback?.playing ? "speaking" as const : presence.status === "speaking" ? "thinking" as const : presence.status }
+        : view.scene.characterStatus === presence.status ? view.scene : { ...view.scene, characterStatus: presence.status },
+    [view.scene, view.playback, presence.status, nativeTts],
   );
 
   // ?trace=1 的取数口（仅诊断；不参与任何业务判断）
@@ -841,7 +842,8 @@ export function App() {
         <StageBoundary onError={(error) => setMediaError(describeRuntimeError(error, "error"))}>
           <Stage
             state={stageState}
-            presence={presence}
+            presence={nativeTts.synchronized ? { ...presence, mouthDrive: view.playback?.playing === true } : presence}
+            mouthPhase={nativeTts.synchronized ? view.playback?.mouth ?? 0 : undefined}
             presenceDebug={traceOn}
             onBranchPick={(id) => store.pickBranch(id)}
           />

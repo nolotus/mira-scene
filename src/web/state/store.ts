@@ -1,3 +1,4 @@
+import type { PlaybackSample } from "../voice/playback";
 /**
  * 会话 store —— 把状态机、SSE、TTS、打断串起来的地方。
  *
@@ -155,6 +156,7 @@ export interface ReconnectView {
 }
 
 export interface SessionView {
+  playback: PlaybackSample | null;
   machine: SessionMachine;
   scene: SessionMachine["scene"];
   session: SessionInfo | null;
@@ -347,6 +349,10 @@ export class SessionStore {
    * 只在被接受的 text.delta 上推进，新一轮 / 打断时归零。
    */
   private cueWatermark = 0;
+  private playback: PlaybackSample | null = null;
+  private playbackOffset = 0;
+  private playedText = "";
+  private playbackSubtitle = "";
   /** 锚在未来的指令，按 atChar 升序（同 atChar 保持到达顺序，见 enqueueCue） */
   private cueQueue: QueuedCue[] = [];
   /** 到达序号：同一 atChar 的多条靠它定序（稳定排序不依赖 Array.sort 的稳定性假设） */
@@ -428,7 +434,10 @@ export class SessionStore {
     const interruptible = () => needsBargeIn(this.machine) || this.audioIsPlaying();
     return {
       machine: this.machine,
-      scene: this.machine.scene,
+      playback: this.playback,
+      scene: this.deps.tts.synchronized
+        ? { ...this.machine.scene, subtitle: this.playbackSubtitle }
+        : this.machine.scene,
       session: this.session,
       connection: this.connection,
       banner: this.banner,
@@ -850,6 +859,10 @@ export class SessionStore {
    * 老 stub（只实现 cancel）退回整轮取消，行为与从前一致。
    */
   private cancelAudio(): void {
+    this.playback = null;
+    this.playbackSubtitle = "";
+    this.playedText = "";
+    this.playbackOffset = 0;
     const tts = this.deps.tts as Partial<{ cancelSentence?: () => void }>;
     if (typeof tts.cancelSentence === "function") {
       tts.cancelSentence();
@@ -934,6 +947,21 @@ export class SessionStore {
   /** 逐帧驱动（vfx 衰减 + 状态条过期）。由 App 的 rAF 调用。 */
   tick(dtMs: number): void {
     let changed = false;
+    if (this.deps.tts.synchronized) {
+      const sample = this.deps.tts.playback ?? null;
+      if (sample) {
+        if (this.playback && sample.sentence !== this.playback.sentence) {
+          this.playbackOffset += charCount(this.playback.text);
+          this.playedText += this.playback.text;
+        }
+        this.playbackSubtitle = this.playedText + Array.from(sample.text).slice(0, sample.revealed).join("");
+        this.cueWatermark = this.playbackOffset + sample.revealed;
+      }
+      this.playback = sample;
+      this.flushCues({ all: false });
+      this.syncCueDiag();
+      changed = true;
+    }
     const scene = tickScene(this.machine.scene, dtMs);
     if (scene !== this.machine.scene) {
       this.machine = { ...this.machine, scene };
@@ -1081,13 +1109,21 @@ export class SessionStore {
     //  · turn.start → 新一轮，旧队列作废。
     if (event.type === "turn.end") {
       if (event.interrupted) this.discardCues();
-      else this.flushCues({ all: true });
+      else if (!this.deps.tts.synchronized) this.flushCues({ all: true });
     } else if (event.type === "error" && !event.recoverable) {
       this.discardCues();
     } else if (event.type === "turn.start") {
       this.resetCues();
     }
 
+    if (this.deps.tts.synchronized && event.type === "directive" &&
+      event.epoch === this.machine.epoch && event.turnId === this.machine.turnId && this.machine.turnActive &&
+      (!this.playback?.playing || !isCueDue(cueAtChar(event) ?? charCount(this.machine.text), this.cueWatermark))) {
+      this.enqueueCue(event);
+      this.syncCueDiag();
+      this.emit();
+      return;
+    }
     const queueBefore = this.machine.scene.pendingActions;
     const { machine, outcome } = reduceEvent(this.machine, event, this.clock(), this.cueWatermark);
     if (outcome === "queued") {
@@ -1115,7 +1151,7 @@ export class SessionStore {
     //  · 用字符数而不是 text.length：`🙂` 在 UTF-16 里是 2，在码点尺子上是 1，
     //    服务端的 atChar 也是按码点算的 —— 用 length 会整整差半格；
     //  · 重算而不是累加：文本一旦被重置（新一轮 / 打断），累加式水位会悄悄漂移。
-    if (event.type === "text.delta") this.cueWatermark = charCount(machine.text);
+    if (event.type === "text.delta" && !this.deps.tts.synchronized) this.cueWatermark = charCount(machine.text);
 
     // 只有真正被接受的事件才驱动声音：迟到/串轮的音频分片连解码都不做
     if (event.type === "audio.chunk" && hasAudioChunkSink(this.deps.tts)) {
@@ -1187,7 +1223,11 @@ export class SessionStore {
   /** 新一轮 / 打断后归零：水位对齐当前全文（通常是空串），队列清空 */
   private resetCues(): void {
     this.cueQueue = [];
-    this.cueWatermark = charCount(this.machine.text);
+    this.cueWatermark = this.deps.tts.synchronized ? 0 : charCount(this.machine.text);
+    this.playback = null;
+    this.playbackOffset = 0;
+    this.playedText = "";
+    this.playbackSubtitle = "";
   }
 
   /**
@@ -1196,7 +1236,7 @@ export class SessionStore {
    * 让它连实现差异都不依赖。
    */
   private enqueueCue(event: Extract<SessionEvent, { type: "directive" }>): void {
-    const atChar = cueAtChar(event) ?? 0;
+    const atChar = cueAtChar(event) ?? (this.deps.tts.synchronized ? charCount(this.machine.text) : 0);
     this.cueSeq += 1;
     const item: QueuedCue = { atChar, seq: this.cueSeq, event };
     const index = this.cueQueue.findIndex((queued) => queued.atChar > atChar);
@@ -1212,7 +1252,7 @@ export class SessionStore {
     while (this.cueQueue.length > 0) {
       const head = this.cueQueue[0];
       if (!head) break;
-      if (!options.all && !isCueDue(head.atChar, this.cueWatermark)) break;
+      if (!options.all && (!isCueDue(head.atChar, this.cueWatermark) || (this.deps.tts.synchronized && (!this.playback || this.playback.revealed === 0)))) break;
       this.cueQueue.shift();
       this.fireCue(head, options.all);
     }
@@ -1227,13 +1267,13 @@ export class SessionStore {
    */
   private fireCue(item: QueuedCue, forced: boolean): void {
     const { machine, outcome } = reduceEvent(
-      this.machine,
+      this.deps.tts.synchronized ? { ...this.machine, turnActive: true, turnId: this.machine.turnId ?? this.machine.lastTurnId } : this.machine,
       item.event,
       this.clock(),
       Number.POSITIVE_INFINITY,
     );
     if (outcome === "applied") {
-      this.machine = machine;
+      this.machine = this.deps.tts.synchronized ? { ...machine, turnActive: this.machine.turnActive, turnId: this.machine.turnId } : machine;
       this.lateCues += 1;
       if (forced) this.forcedCues += 1;
       return;

@@ -175,6 +175,8 @@ export function withDemoTts(
     get name(): string {
       return tts.name;
     },
+    get playback() { return tts.playback; },
+    get synchronized() { return tts.synchronized; },
     get isSpeaking(): boolean {
       return tts.isSpeaking;
     },

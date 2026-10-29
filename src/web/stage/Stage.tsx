@@ -44,12 +44,14 @@ export function Stage({
   onBranchPick,
   presence,
   presenceDebug,
+  mouthPhase,
 }: StageProps & {
   /**
    * 在场状态（只读消费）：渲染层不推导它，只照着画。
    * 缺省（未接线 / preview 页）时口型退回原行为，三条像素验收路径不受影响。
    */
   presence?: Presence;
+  mouthPhase?: number;
   /** `?trace=1`：HUD 多一行 `在场状态：speaking ← tts:playing`，用于对拍与录屏取证 */
   presenceDebug?: boolean;
 }) {
@@ -91,7 +93,7 @@ export function Stage({
           style={vars(sceneVars(specOf(state.scene)))}
         >
           <StageBackdrop scene={state.scene} />
-          <Character state={state} actionNonce={action.n} mouthDrive={presence?.mouthDrive} />
+          <Character state={state} actionNonce={action.n} mouthDrive={presence?.mouthDrive} mouthPhase={mouthPhase} />
           {/* 由对话触发的显著视觉事件：每次 lastBeat 变化重播一次 */}
           <div className="stage-beat" key={`beat-${beat.n}`} data-tone={tone} aria-hidden="true">
             <span className="beat-sweep" />
