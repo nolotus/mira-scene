@@ -11,7 +11,7 @@
 | # | 要求 | 状态 | 证据 | 下一步 |
 |---|---|---|---|---|
 | ① | 场景化界面（非聊天列表）+ 待机/倾听/思考/说话 4 态 | **做完** | `StageBackdrop.tsx` 4 层景深；四态见 `visuals.ts STATUS_SPEC`；截图 `/tmp/shots/live-idle-*.png`（三时刻采样验证非动画假象） | —（构图微调已做：`bottom:30%/height:56%`） |
-| ② | 文字 + 麦克风互动，语音回复 + 同步字幕，多轮 | **做完** | STT：Deepgram `nova-2`(zh) 服务端 WS 代理，实测 `1×speech_started + 3×interim + 1×final`（final 滞后约 1.1s）；TTS：中文 Edge `zh-CN-XiaoxiaoNeural`（round-trip 置信度 1.00）、英文 Deepgram Aura。**中文 TTS 延迟实测**：CLI 路径 1711ms → 原生 WS 热连接 **287ms**（冷启动首次握手 1192ms） | — |
+| ② | 文字 + 麦克风互动，语音回复 + 同步字幕，多轮 | **做完** | STT：Deepgram `nova-2`(zh) 与阿里百炼 `qwen-audio-3.0-asr-flash-streaming` 服务端 WS 代理（边收边转 interim+final，Deepgram 滞后约 1.1s，百炼实测通）；TTS：中文 Edge `zh-CN-XiaoxiaoNeural`（round-trip 置信度 1.00）、英文 Deepgram Aura、浏览器系统音兜底。**中文 TTS 延迟实测**：CLI 路径 1711ms → 原生 WS 热连接 **287ms**（冷启动首次握手 1192ms） | — |
 | ③ | 语音打断五条后果 + 迟到响应不重播 | **做完（机制层）** | 五步链路 + `epoch+turnId` 双闸门（真服务端连打断 10 次 0 失效）+ TTS 代际令牌 + 「丢弃迟到事件 N」可见。**根因修复**：WS 握手期间丢音频 → pre-roll 有界队列（1.5s，超限丢最旧并计数）。**单一触发源**：`deepgram/energy/none` 三态，源不匹配不进闸门。**fire 时重新校验** `speaking`/`source`（arm 成立≠fire 成立）。**真浏览器实测**：`speech_started → 音频停止 200.2ms`。 | **真机待验**：AEC 未上报时按保守策略 `source=none`（自动语音打断关闭，只剩 Esc/按钮）；真人外放是否自打断只有真机可定 |
 | ④ | 结构化指令驱动画面（3 情绪 / 2 动作 / 1 场景变化 / 1 内容触发事件） | **做完** | 7 类 Directive；`CUE_TEMPLATES` 四套时序（storm 1800ms 四层）；输入「外面还在下雨吗」→ `shiver/lightning/rain_heavy/camera.shake/glance_window`；闪电只在 storm（结构性测试锁死）；**指令已锚定字符位置**（`atChar`，服务端按字符边界投递，老客户端退化为立即执行） | 客户端按水位排队接线（`state/session.ts` + `store.ts`），等 `state/**` 腾出 |
 | ⑤ | ≥1 种多模态 + 加载/结束/中断/失败 | **做完** | 真媒体片段：12 帧 spritesheet 145KB（程序化生成 + 自写调色板量化），四态真进分支，`?demo=media` 演示 404 降级；照片级角色 `?char=photo`（素材 + 变体 + 微动） | 照片版"贴上去"感（接触阴影/边缘色匹配） |
@@ -23,7 +23,7 @@
 |---|---|---|---|
 | 1 | 源代码仓库 | **做完** | GitHub 私有仓库，含题目 PDF、README、AI_USAGE、`docs/` |
 | 2 | 可访问演示地址 | **做完** | `https://mira.nolo.chat`：LE 证书、SSE 真流式（首末事件间隔 1372ms）、`?director=live` 实测 `mode:"live"`、生成插图实测 1.9s/730KB |
-| 3 | 一条命令启动 | **做完** | `bun install && bun run dev`（vite 5173 + server 8787） |
+| 3 | 一条命令启动 | **做完（安装构建）/ 待交互闭环** | 新依赖补入 `@types/bun@1.4.4`；在全新隔离临时目录执行 `bun install --frozen-lockfile`、`bun run typecheck`、`bun run build` 均干净通过（与主仓库 package.json/bun.lock 一致）；375px 浏览器启动已截图核实（Mock 连接建立、8/8 素材预取完成），但安装构建通过不等于 dev 启动全部交互验收，多轮交互与外设交互仍在验证中。 |
 | 4 | 3–5 分钟录屏 | **未做** | 分镜脚本 `docs/demo-script.md`（含镜头↔要求对应表、4 个故障注入开关）。**本机 Chrome 零 TTS 语音、无麦克风，只能由人在有麦克风的机器上录** |
 | 5 | README 八小节 | **做完** | 架构 / 打断流程 / 指令设计 / 取舍 / 已知问题 / 投入时间 / 两周演进 / 第三方服务与语音通道 |
 | 6 | AI_USAGE 四项 | **做完** | 工具清单、AI 参与范围、人工验证清单、**两次「AI 给了看似合理的错误结论被发现」的真实例子** |
@@ -79,12 +79,12 @@
 
 | 项 | 状态 | 证据 / 成本 | ROI |
 |---|---|---|---|
-| Provider 可替换 | **做完** | Director（Mock/OpenAI 兼容）、TTS（浏览器/Deepgram/Edge）、STT（Web Speech/Deepgram） | — |
+| Provider 可替换 | **做完** | Director（Mock/OpenAI 兼容）、TTS（浏览器/Deepgram/Edge）、STT（Web Speech/Deepgram/阿里百炼） | — |
 | 统一取消信号 | **做完** | `AbortSignal` 贯穿导演、SSE、in-flight、音频 | — |
-| 自动化测试 | **做完** | 512 用例：陈旧事件丢弃、代际令牌、并发闸门、cue 编排、片段四态、配额缓存 | — |
+| 自动化测试 | **做完** | 历史快照 512 用例；本轮验证快照（分 5 批次）：全量 58 测试文件、739 pass / 0 fail / 0 skip，typecheck 0 报错；单测均为 mock/stub 内存执行，**不可据此断言真机/真实浏览器通过**。详见后文「五、本轮验证快照」 | — |
 | 记录主要状态事件 | **部分** | 有 timings/丢弃计数/守卫统计/片段失败（成本 1h：结构化事件日志） | **高**：回放的前提 |
 | 会话回放 / 问题诊断 | **部分** | 诊断面板齐全；回放未做（事件流有序，成本 2h） | **高**：评审一眼看懂工程功底 |
-| 观测页面（延迟/错误/模型调用） | **部分** | 折叠诊断面板（成本 1.5h：`?obs=1` 独立页 + 模型调用统计） | 中 |
+| 观测页面（延迟/错误/模型调用） | **做完** | 支持折叠式诊断面板及 `?obs=1` 独立观测抽屉（展示分段耗时 p50/p95、错误与 TTS 调用统计） | — |
 
 ---
 
@@ -97,3 +97,29 @@
 5. 可选·角色表演：动作优先级队列
 6. 照片版观感修正（接触阴影/边缘色匹配/中性闭唇定妆照）
 7. 收口：全量三项 → 部署 → 独立 review → 录屏（需人工）
+
+---
+
+## 五、本轮验证快照（2026-10-29）
+
+> 验证基准：2026-10-29 独立验证批次与干净目录复现测试（命令：`bun test` 5 批分跑、`bun run typecheck`、`bun run build`）
+
+- **干净安装、静态类型与构建**：
+  - 依赖补充 `@types/bun@1.4.4`；在全新隔离临时目录复现验证，执行 `bun install --frozen-lockfile` 干净安装通过，`package.json` 与 `bun.lock` 一致。
+  - `bun run typecheck`（`tsc --noEmit`）：通过（exitCode 0，无 emit）。
+  - `bun run build`：首次生产构建与干净目录构建均顺利生成静态产物（`dist/`）。但**安装构建通过不等于 dev 运行与界面交互全部验收**。
+- **单元测试全量快照（分 5 批串行执行）**：
+  - Batch 1（Server 核心/协议/导演/TTS）：12 文件，133 pass / 0 fail / 0 skip（923ms）
+  - Batch 2（Server 演出/阿里 STT/流式）：11 文件，187 pass / 0 fail / 0 skip（3.19s）
+  - Batch 3（Web 会话/打断/状态机/Cues）：12 文件，115 pass / 0 fail / 0 skip（430ms）
+  - Batch 4（Web 门禁/插图/STT/打断/角色）：12 文件，201 pass / 0 fail / 0 skip（189ms）
+  - Batch 5（Web 优先级/重连/预加载/观测）：11 文件，103 pass / 0 fail / 0 skip（6.58s）
+  - **总计**：58 文件，**739 pass / 0 fail / 0 skip**（耗时 ~11.3s）。
+- **浏览器与界面实测进展**：
+  - 375px 移动端视口浏览器启动已核实：零密钥 Mock 连接正常建立，8/8 项静态与变体素材预取完成。
+  - 375px 浏览器受控测试已核实：文字输入产生递增字幕；手动打断后进入倾听，连续 1.8 秒旧字幕不增长、状态不回跳；随后第二轮文字互动正常。测试注入了 `speechSynthesis` 桩控制时序，不代表真实扬声器发声或麦克风输入通过。
+  - 雨夜序列帧片段有截图证据；探针提前停止采样且未检测片段节点，原始报告的视觉检测为 false，因此未把闪电、雨势和镜头等瞬态指标判为全部通过。
+  - 真实麦克风、外放自动打断、真模型与云端语音链路仍待现场验收；正式录屏尚未在仓库中找到。
+- **边界与口径纪律**：
+  - **不把单测当真机**：所有单测均基于内存 stub / mock dispatch，无外设硬件与网络回路，**绝不可据测试通过断言实体麦克风/外放环境或真实交互完全就绪**。
+  - **历史数据保留**：保留早期阶段的 87 pass、391 pass 与 512 pass 真实历史快照，不作机械覆盖。

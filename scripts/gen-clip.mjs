@@ -1,7 +1,17 @@
 /**
- * 生成「暴雨夜」媒体片段 —— 一次性工具，产物是 public/clip/storm-strip.png。
+ * 生成「暴雨夜」媒体片段 —— 可选重新生成素材工具，产物是 public/clip/storm-strip.png。
  *
- * 运行：bun scripts/gen-clip.mjs
+ * 说明：
+ *   此脚本为可选开发工具，仅用于重新生成媒体片段素材（spritesheet）。
+ *   仓库已内置已提交的素材文件（public/clip/storm-strip.png），日常开发、测试、
+ *   构建与项目启动均不依赖此脚本，也不强制要求安装 puppeteer-core 或 Chrome。
+ *
+ * 运行（按需重新生成）：
+ *   node scripts/gen-clip.mjs 或 bun scripts/gen-clip.mjs
+ *
+ * 配置项（环境变量）：
+ *   - PUPPETEER_CORE_PATH: 自定义 puppeteer-core 模块路径或包名（可选覆盖，默认按标准本地依赖解析）
+ *   - CHROME_PATH / PUPPETEER_EXECUTABLE_PATH: Chrome 可执行文件路径（默认 /usr/bin/google-chrome）
  *
  * 为什么要有它：题目要求「处理加载 / 播放结束 / 中途打断 / 失败」这四态，而 SVG 角色动画
  * 没有可加载、可播放结束、可解码失败的媒体资源，等于绕开了考点。所以这里真的产出一张
@@ -15,22 +25,65 @@
  *
  * 体积控制（实测）：抗锯齿斜线 + 每帧独立随机 + 大量半透明径向渐变会把 PNG 推到 900KB+。
  * 因此这里刻意用「扁平色块 + 少量色阶 + 跨帧共享的雨滴表」，让 PNG 的逐扫线滤波器有东西可压缩。
- *
- * 依赖系统 Chrome（无下载）：/usr/bin/google-chrome + puppeteer-core（全局安装）。
  */
 
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import zlib from "node:zlib";
 
 const require = createRequire(import.meta.url);
-const puppeteer = require("/home/nolotus/.bun/install/global/node_modules/puppeteer-core");
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const OUT = join(ROOT, "public", "clip", "storm-strip.png");
-const CHROME = "/usr/bin/google-chrome";
+const CHROME =
+  process.env.CHROME_PATH ||
+  process.env.PUPPETEER_EXECUTABLE_PATH ||
+  "/usr/bin/google-chrome";
+
+async function loadPuppeteer() {
+  const customPath = process.env.PUPPETEER_CORE_PATH;
+  if (customPath) {
+    try {
+      const isPathLike =
+        customPath.startsWith(".") ||
+        customPath.startsWith("/") ||
+        customPath.includes("/");
+      if (isPathLike) {
+        try {
+          return require(resolve(customPath));
+        } catch {
+          const mod = await import(pathToFileURL(resolve(customPath)).href);
+          return mod.default || mod;
+        }
+      }
+      const mod = await import(customPath);
+      return mod.default || mod;
+    } catch (err) {
+      console.error(
+        `[gen-clip] 无法从 PUPPETEER_CORE_PATH (${customPath}) 加载 puppeteer-core: ${err?.message ?? err}\n` +
+          "  说明：此脚本为可选重新生成素材工具，不影响已有提交素材与项目启动。",
+      );
+      process.exit(1);
+    }
+  }
+
+  try {
+    const mod = await import("puppeteer-core");
+    return mod.default || mod;
+  } catch (err) {
+    console.error(
+      `[gen-clip] 缺少 puppeteer-core 依赖（${err?.message ?? err}）。\n` +
+        "  可操作建议：\n" +
+        "    1. 若需重新生成素材，可安装本地依赖：npm i -D puppeteer-core（或 bun add -d puppeteer-core）\n" +
+        "    2. 或通过环境变量指定模块路径：PUPPETEER_CORE_PATH=/path/to/puppeteer-core node scripts/gen-clip.mjs\n" +
+        "  说明：此脚本为可选重新生成素材工具，仓库已提交素材位于 public/clip/storm-strip.png，日常开发、构建与启动无需此脚本与 puppeteer。",
+    );
+    process.exit(1);
+  }
+}
 
 const FRAME_W = 320;
 const FRAME_H = 180;
@@ -658,6 +711,20 @@ function encodeIndexedPng(width, height, indices, palette) {
 }
 
 async function main() {
+  const puppeteer = await loadPuppeteer();
+
+  if (!existsSync(CHROME)) {
+    console.error(
+      `[gen-clip] 未找到 Chrome 可执行文件：${CHROME}\n` +
+        "  可操作建议：\n" +
+        "    1. 请确保系统已安装 Chrome/Chromium，或通过环境变量指定路径：\n" +
+        "       CHROME_PATH=/path/to/chrome node scripts/gen-clip.mjs\n" +
+        "       或 PUPPETEER_EXECUTABLE_PATH=/path/to/chrome node scripts/gen-clip.mjs\n" +
+        "  说明：此脚本为可选重新生成素材工具，仓库已提交素材位于 public/clip/storm-strip.png，日常开发、构建与启动无需此脚本。",
+    );
+    process.exit(1);
+  }
+
   const browser = await puppeteer.launch({
     executablePath: CHROME,
     headless: true,
