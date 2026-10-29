@@ -810,7 +810,7 @@ export class SessionStore {
         },
         // 打断会 bump epoch，旧轮的 turn.end 随后会被闸门丢弃 —— 这里的 cancel 是旧轮
         // 唯一一次「静音」机会，漏掉就会让缓冲里的音频继续说完
-        cancelAudio: () => this.deps.tts.cancel(),
+        cancelAudio: () => this.cancelAudio(),
         abortInflight: () => {
           this.inflight?.abort();
           this.inflight = null;
@@ -837,6 +837,25 @@ export class SessionStore {
     this.lastBargeIn = result;
     this.emit();
     return result;
+  }
+
+  /**
+   * 打断时的静音：走**句子级**取消。
+   *
+   * 语义（见 tts.ts 的 cancelSentence）：
+   *   · 当前这句话立刻停；
+   *   · 已生成、尚未播的后续句子作废；
+   *   · 在飞的合成请求被 abort —— 服务端的 Edge 名额立刻释放，
+   *     下一轮的第一句不必等旧轮的 TTS 队列排空。
+   * 老 stub（只实现 cancel）退回整轮取消，行为与从前一致。
+   */
+  private cancelAudio(): void {
+    const tts = this.deps.tts as Partial<{ cancelSentence?: () => void }>;
+    if (typeof tts.cancelSentence === "function") {
+      tts.cancelSentence();
+      return;
+    }
+    this.deps.tts.cancel();
   }
 
   /** 发送一轮输入（文字或 STT 转写）。角色正在说话时先打断。 */

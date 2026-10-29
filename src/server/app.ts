@@ -371,7 +371,7 @@ export function createApp(options: AppOptions = {}): App {
       const body = await safeJson(request);
       // 流式只在**显式要**的时候才走：不带 stream 的请求一个字节都不变（既有客户端不受影响）
       if (wantsStreamedAudio(url, request.headers) && tts.synthesizeStream) {
-        const streamed = await tts.synthesizeStream(body);
+        const streamed = await tts.synthesizeStream(body, { signal: request.signal });
         // 还没开始转发就失败：沿用原来的 JSON 契约（客户端照样能读 reason 回退）
         if (!streamed.ok) return json({ reason: streamed.reason }, streamed.status, origin);
         return new Response(chunksToStream(streamed.chunks), {
@@ -384,7 +384,7 @@ export function createApp(options: AppOptions = {}): App {
           },
         });
       }
-      const result = await tts.synthesize(body);
+      const result = await tts.synthesize(body, { signal: request.signal });
       if (!result.ok) return json({ reason: result.reason }, result.status, origin);
       return new Response(result.bytes.slice().buffer, {
         status: 200,

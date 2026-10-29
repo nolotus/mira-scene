@@ -37,6 +37,18 @@ export interface TTSProvider {
   flush(): void;
   /** 立即静音：停掉正在播的 + 清空队列 */
   cancel(): void;
+  /**
+   * 句子级取消（可选实现）：
+   *   · 当前**这一句**立刻停；
+   *   · 已生成、尚未播的后续句子作废；
+   *   · 在飞的合成请求被 abort（网络连接与服务端名额一起释放）；
+   *   · 取消**之后**新派发的句子不受影响（它们的句子 id 更大）。
+   *
+   * 与 `cancel()` 的唯一区别就是最后一条：`cancel()` 把整条管道拆掉，
+   * `cancelSentence()` 只作废「到此刻为止发出的那些句子」。
+   * 没有实现的老 stub 走 `cancel()` 兜底（见 store 的 cancelAudio）。
+   */
+  cancelSentence?(): void;
   dispose(): void;
 }
 
@@ -671,7 +683,11 @@ export type SpeakStreamResult =
   | { ok: true; chunks: AsyncIterable<Uint8Array> }
   | { ok: false; reason: string };
 
-export type SpeakStream = (text: string) => Promise<SpeakStreamResult>;
+/**
+ * `signal` 是**句子级取消**的抓手：取消时 abort 它，
+ * fetch 立刻断开，服务端那一路合成（Edge WS 名额）也就立刻释放。
+ */
+export type SpeakStream = (text: string, signal?: AbortSignal) => Promise<SpeakStreamResult>;
 
 /**
  * 入队前的最小聚合字节数。
@@ -725,12 +741,13 @@ async function* readBody(body: ReadableStream<Uint8Array>): AsyncGenerator<Uint8
  * 失败（非 2xx / 没有 body）只回 reason —— 调用方据此对这一句回退本机音。
  */
 export function createSpeakStream(fetcher: typeof fetch = fetch): SpeakStream {
-  return async (text) => {
+  return async (text, signal) => {
     try {
       const res = await fetcher("/api/tts?stream=1", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text }),
+        signal,
       });
       if (!res.ok) {
         let reason = `status-${res.status}`;
@@ -750,16 +767,17 @@ export function createSpeakStream(fetcher: typeof fetch = fetch): SpeakStream {
   };
 }
 
-export type SpeakRequest = (text: string) => Promise<SpeakRequestResult>;
+export type SpeakRequest = (text: string, signal?: AbortSignal) => Promise<SpeakRequestResult>;
 
 /** 默认实现：POST /api/tts 拿 MP3。失败只回 reason（服务端的 400/502 原因码）。 */
 export function createSpeakRequest(fetcher: typeof fetch = fetch): SpeakRequest {
-  return async (text) => {
+  return async (text, signal) => {
     try {
       const res = await fetcher("/api/tts", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ text }),
+        signal,
       });
       if (!res.ok) {
         let reason = `status-${res.status}`;
@@ -805,9 +823,19 @@ export interface RoutedTtsOptions {
 /** 同时在飞的合成请求数：1 个当前句 + 1 个预取。服务端也限 2 个 CLI 进程，正好对齐。 */
 const MAX_SYNTH_INFLIGHT = 2;
 
+/** 首句预热用的极短文本（CJK → Edge 那一路） */
+const PREWARM_TEXT_ZH = "。";
+
 interface SynthJob {
   /** 句序号（入队序），交付顺序以它为准 */
   order: number;
+  /**
+   * **句子 id**（发号序）：句子级取消的代际令牌。
+   *
+   * 取消只作废 `id <= cancelledSentence` 的句子；取消之后新派发的句子 id 更大，
+   * 因此不受影响 —— 这就是「打断只清旧句、不误伤下一轮」的根据。
+   */
+  sentence: number;
   text: string;
   tier: "edge" | "deepgram";
   /**
@@ -862,6 +890,14 @@ export class RoutedTTS implements TTSProvider {
   private synthHead = 0;
   /** 按句序排好的交付状态：分片先进各自队列，只有「队首」允许立刻入播放器 */
   private readonly jobs = new Map<number, JobState>();
+  /** 已发出的句子 id（发号器）：句子级取消用它划定「作废范围」的右界 */
+  private sentenceSeq = 0;
+  /** <= 这个 id 的句子全部作废（取消之后新发的句子 id 更大，不受影响） */
+  private cancelledSentence = 0;
+  /** 每句自己的 AbortController：取消只 abort 这些句子的合成请求 */
+  private readonly sentenceControllers = new Map<number, AbortController>();
+  /** 首句预热是否已经做过（只做一次） */
+  private prewarmed = false;
   private browserNoticeSent = false;
   private readonly lang: string;
   private readonly onSegment: ((text: string) => void) | null;
@@ -913,7 +949,30 @@ export class RoutedTTS implements TTSProvider {
   warmUp(): void {
     const status = this.getStatus();
     if (status?.tts !== true && status?.ttsZh !== true) return;
-    this.ensureStream().warmUp();
+    // 先预热：连接捂热比 AudioContext 恢复更影响首句延迟，
+    // 且后者在个别环境里会抛（没有 AudioContext）—— 不能让它连累预热。
+    this.prewarmTts(status);
+    try {
+      this.ensureStream().warmUp();
+    } catch {
+      /* 音频上下文起不来：预热仍然有效 */
+    }
+  }
+
+  /**
+   * 首句预热：先发一次**极短**的合成请求，把上游的连接冷启
+   * （Edge WS 握手实测约 1.2s）挪到用户还在打字/说话的时候。
+   *
+   * 预热返回的音频直接丢掉（不进播放器、不进字幕）—— 它只负责把连接捂热。
+   * 整轮只做一次；失败不重试、不出声（预热失败 = 没有预热，不该有别的后果）。
+   */
+  private prewarmTts(status: TtsCapability | null): void {
+    if (this.prewarmed) return;
+    if (status?.ttsZh !== true && status?.tts !== true) return;
+    this.prewarmed = true;
+    // 中文走 Edge、纯英文走 Deepgram：预热文本必须落在同一条路上，否则白捂
+    const text = status?.ttsZh === true ? PREWARM_TEXT_ZH : "ok";
+    void Promise.resolve(this.speakRequest(text)).catch(() => undefined);
   }
 
   speak(text: string): void {
@@ -937,14 +996,38 @@ export class RoutedTTS implements TTSProvider {
   cancel(): void {
     this.generation += 1;
     this.buffer = "";
-    // 流水线整体作废：队列清空，在飞的结果因 generation 不符被丢弃
-    this.synthQueue.length = 0;
-    this.synthInflight = 0;
-    this.jobs.clear();
-    this.synthHead = this.synthOrder;
+    // 整轮取消 = 句子级取消 + 把 provider 状态复位（回退提示只说一次）
+    this.cancelSentence();
     this.browserNoticeSent = false;
+  }
+
+  /**
+   * 句子级取消（打断用）：
+   *   ① 当前这句立刻停（正在播的音频 + 本机音）；
+   *   ② 已生成、尚未播的后续句子作废（队列里的、已到手但没播的，都丢）；
+   *   ③ 在飞的合成请求 abort —— 网络断开、服务端的 Edge 名额立刻释放，
+   *      下一轮的第一句因此**不必等旧轮的 TTS 队列排空**。
+   *
+   * 作废范围由句子 id 划定（`<= cancelledSentence`）；取消之后新派发的句子 id 更大，
+   * 不受影响 —— 这是它与 `cancel()` 的唯一区别，也是它比 `cancel()` 更安全的地方。
+   */
+  cancelSentence(): void {
+    // ① 当前这句立刻停
     this.browser?.cancel();
     this.stream?.cancel();
+    // ② 作废到此刻为止发出的所有句子
+    this.cancelledSentence = this.sentenceSeq;
+    this.generation += 1; // 在飞的结果回来时凭它自我作废（迟到不回放）
+    this.synthQueue.length = 0;
+    for (const order of [...this.jobs.keys()]) {
+      const state = this.jobs.get(order);
+      if (state && state.job.sentence <= this.cancelledSentence) this.jobs.delete(order);
+    }
+    this.synthHead = this.synthOrder;
+    this.synthInflight = 0;
+    // ③ 中止在飞的合成请求（服务端那一路也会跟着中止）
+    for (const controller of this.sentenceControllers.values()) controller.abort();
+    this.sentenceControllers.clear();
   }
 
   dispose(): void {
@@ -990,8 +1073,10 @@ export class RoutedTTS implements TTSProvider {
       this.ensureBrowser().speak(segment);
       return;
     }
+    const sentence = (this.sentenceSeq += 1);
     this.synthQueue.push({
       order: this.synthOrder,
+      sentence,
       text: segment,
       tier,
       turnId: currentObsTurnId() ?? undefined,
@@ -1025,18 +1110,26 @@ export class RoutedTTS implements TTSProvider {
     const generation = this.generation;
     const state: JobState = { job, chunks: [], done: false, failed: null, gotAudio: false };
     this.jobs.set(job.order, state);
-    await this.synthAttempt(state, generation);
-    // 重试一次：503 `not-configured` 实测是服务端原生 WS 的探测竞态
-    // （同一轮里 4271ms 那句失败、5708ms 的同批请求就成功），第二次几乎必成。
-    // 没有这次重试，一次偶发就等价于「这一句永远没声音」。
-    // 只在「一个字都还没送进播放器」时重试。
-    // 已经出过声的句子重试会让前半句从 0 再播一遍（用户听到重播/破音），
-    // 那种情况下宁可这一句就此静音（字幕仍在）。
-    if (state.failed && !state.gotAudio && generation === this.generation) {
-      state.failed = null;
-      state.chunks.length = 0;
-      state.gotAudio = false;
-      await this.synthAttempt(state, generation);
+    // 句子级取消的抓手：这一句自己的 AbortController。
+    // 取消只 abort 这一句的请求 —— 取消之后新派发的句子（id 更大）不受影响。
+    const controller = new AbortController();
+    this.sentenceControllers.set(job.sentence, controller);
+    try {
+      await this.synthAttempt(state, generation, controller.signal);
+      // 重试一次：503 `not-configured` 实测是服务端原生 WS 的探测竞态
+      // （同一轮里 4271ms 那句失败、5708ms 的同批请求就成功），第二次几乎必成。
+      // 没有这次重试，一次偶发就等价于「这一句永远没声音」。
+      // 只在「一个字都还没送进播放器」时重试。
+      // 已经出过声的句子重试会让前半句从 0 再播一遍（用户听到重播/破音），
+      // 那种情况下宁可这一句就此静音（字幕仍在）。
+      if (state.failed && !state.gotAudio && generation === this.generation) {
+        state.failed = null;
+        state.chunks.length = 0;
+        state.gotAudio = false;
+        await this.synthAttempt(state, generation, controller.signal);
+      }
+    } finally {
+      this.sentenceControllers.delete(job.sentence);
     }
     // 打断之后回来的音频：不占槽、不入队、不出声（cancel 已经把计数器清零）
     if (generation !== this.generation) {
@@ -1050,21 +1143,21 @@ export class RoutedTTS implements TTSProvider {
   }
 
   /** 单次合成尝试（不含重试）。失败只记原因，由 `runSynth` 决定是否再试。 */
-  private async synthAttempt(state: JobState, generation: number): Promise<void> {
+  private async synthAttempt(state: JobState, generation: number, signal?: AbortSignal): Promise<void> {
     try {
-      if (this.speakStream) await this.runSynthStreaming(state, generation);
-      else await this.runSynthBuffered(state, generation);
+      if (this.speakStream) await this.runSynthStreaming(state, generation, signal);
+      else await this.runSynthBuffered(state, generation, signal);
     } catch (err) {
       state.failed = state.failed ?? (err instanceof Error ? err.message : "network");
     }
   }
 
   /** 流式：按 ~1KB 聚合后入队，句尾的零头在流结束时补上（不能丢，丢了句尾缺字） */
-  private async runSynthStreaming(state: JobState, generation: number): Promise<void> {
+  private async runSynthStreaming(state: JobState, generation: number, signal?: AbortSignal): Promise<void> {
     const speakStream = this.speakStream;
     if (!speakStream) return;
     const requestStartedAt = performance.now();
-    const result = await speakStream(state.job.text);
+    const result = await speakStream(state.job.text, signal);
     obsEvent("tts:request", {
       turnId: state.job.turnId,
       detail: {
@@ -1106,8 +1199,8 @@ export class RoutedTTS implements TTSProvider {
   }
 
   /** 整块：既有行为，一字不变地保留（Deepgram 英文路径就是这条） */
-  private async runSynthBuffered(state: JobState, generation: number): Promise<void> {
-    const result = await this.speakRequest(state.job.text);
+  private async runSynthBuffered(state: JobState, generation: number, signal?: AbortSignal): Promise<void> {
+    const result = await this.speakRequest(state.job.text, signal);
     if (generation !== this.generation) return;
     if (result.ok) {
       state.chunks.push(`data:audio/mpeg;base64,${bytesToBase64(new Uint8Array(result.bytes))}`);
@@ -1126,6 +1219,12 @@ export class RoutedTTS implements TTSProvider {
     for (;;) {
       const state = this.jobs.get(this.synthHead);
       if (!state) return;
+      if (state.job.sentence <= this.cancelledSentence) {
+        // 已被句子级取消作废：迟到的音频绝不进播放器（迟到不回放）
+        this.jobs.delete(state.job.order);
+        this.synthHead += 1;
+        continue;
+      }
       while (state.chunks.length > 0) {
         const dataUrl = state.chunks.shift();
         if (!dataUrl) break;

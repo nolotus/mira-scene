@@ -101,11 +101,16 @@ export interface TtsProxyOptions {
   log?: (line: string) => void;
 }
 
+/** 一次合成请求的可选上下文：`signal` 用来在客户端打断/断开时中止上游合成 */
+export interface TtsRequestOptions {
+  signal?: AbortSignal;
+}
+
 export interface TtsProxy {
   readonly configured: boolean;
-  synthesize(raw: unknown): Promise<TtsResult>;
+  synthesize(raw: unknown, opts?: TtsRequestOptions): Promise<TtsResult>;
   /** 可选：支持流式（只有路由层实现；Deepgram 代理不支持） */
-  synthesizeStream?(raw: unknown): Promise<TtsStreamResult>;
+  synthesizeStream?(raw: unknown, opts?: TtsRequestOptions): Promise<TtsStreamResult>;
   /** 可选：两条路的可用性（诊断用；不含任何凭据） */
   readonly routes?: { english: boolean; chinese: boolean };
   /** 可选：原生快路径状态（诊断区用） */
@@ -136,7 +141,7 @@ export function createTtsProxy(options: TtsProxyOptions): TtsProxy {
       return config !== null;
     },
 
-    async synthesize(raw: unknown): Promise<TtsResult> {
+    async synthesize(raw: unknown, opts?: TtsRequestOptions): Promise<TtsResult> {
       const text = typeof raw === "object" && raw !== null && "text" in raw ? (raw as { text?: unknown }).text : undefined;
       if (typeof text !== "string") return { ok: false, status: 400, reason: "text-required" };
 
@@ -146,6 +151,13 @@ export function createTtsProxy(options: TtsProxyOptions): TtsProxy {
 
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(new Error("upstream timeout")), timeoutMs);
+      // 客户端打断/断开 → 立刻中止上游合成（不必等满 timeout）
+      const external = opts?.signal;
+      const onExternalAbort = (): void => controller.abort(external?.reason);
+      if (external) {
+        if (external.aborted) controller.abort(external.reason);
+        else external.addEventListener("abort", onExternalAbort, { once: true });
+      }
       const started = performance.now();
       try {
         const response = await doFetch(upstreamSpeakUrl(), {
@@ -175,6 +187,7 @@ export function createTtsProxy(options: TtsProxyOptions): TtsProxy {
         return { ok: false, status: 502, reason: "upstream-error" };
       } finally {
         clearTimeout(timer);
+        external?.removeEventListener("abort", onExternalAbort);
       }
     },
   };
@@ -384,11 +397,12 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
    * 打开原生流并**取到第一块**：拿到才说明这条路真的能用。
    * 失败返回 null（已记下原因、关掉原生），由调用方接着试 CLI。
    */
-  async function openNative(text: string): Promise<NativeHead | null> {
+  async function openNative(text: string, signal?: AbortSignal): Promise<NativeHead | null> {
     const params = zhParams();
     if (!nativeEnabled() || !edgeWs || !params) return null;
     const started = performance.now();
-    const iterator = edgeWs.synthesizeStream(text, params);
+    // signal 透传：客户端一打断，这条 Edge 连接立刻中止，名额立刻还回池子
+    const iterator = edgeWs.synthesizeStream(text, params, signal);
     try {
       const head = await iterator.next();
       const ms = Math.round(performance.now() - started);
@@ -415,7 +429,7 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
     return result.ok ? result.bytes : null;
   }
 
-  async function synthesizeEdge(text: string): Promise<TtsResult> {
+  async function synthesizeEdge(text: string, signal?: AbortSignal): Promise<TtsResult> {
     const keyBase = edgeKey();
     if (!keyBase) {
       log(`[tts] route=zh voice=none reason=tts-unavailable`);
@@ -429,7 +443,7 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
     }
 
     const started = performance.now();
-    const native = await openNative(text);
+    const native = await openNative(text, signal);
     if (native) {
       try {
         // 非流式调用方要的是整块：中途断流时**还没往客户端写任何东西**，所以可以整段回退 CLI
@@ -456,7 +470,7 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
     return { ok: true, bytes: cliBytes, mime: "audio/mpeg" };
   }
 
-  async function synthesizeEnglish(text: string): Promise<TtsResult> {
+  async function synthesizeEnglish(text: string, signal?: AbortSignal): Promise<TtsResult> {
     if (!deepgram || !deepgram.configured) {
       return { ok: false, status: 503, reason: "not-configured" };
     }
@@ -466,7 +480,7 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
       log(`[tts] route=en bytes=${cached.bytes.byteLength} cache=hit`);
       return { ok: true, bytes: cached.bytes, mime: cached.mime };
     }
-    const result = await deepgram.synthesize({ text });
+    const result = await deepgram.synthesize({ text }, { signal });
     if (!result.ok) return result;
     cache.set(key, { bytes: result.bytes, mime: result.mime });
     return result;
@@ -481,7 +495,7 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
    *     用户会在分片接缝处听到一个停顿，比从头合成还难受。
    * 所以流式路径命中已有的整块缓存就直接一整块吐出去（最快），否则不落缓存。
    */
-  async function streamEdge(text: string): Promise<TtsStreamResult> {
+  async function streamEdge(text: string, signal?: AbortSignal): Promise<TtsStreamResult> {
     const keyBase = edgeKey();
     if (!keyBase) {
       log(`[tts] route=zh voice=none reason=tts-unavailable`);
@@ -493,7 +507,7 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
       return { ok: true, mime: cached.mime, source: "cache", chunks: singleChunk(cached.bytes) };
     }
 
-    const native = await openNative(text);
+    const native = await openNative(text, signal);
     if (native) {
       return {
         ok: true,
@@ -536,7 +550,7 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
       return deepgram?.configured === true || edge?.available === true || edgeWs !== null;
     },
 
-    async synthesize(raw: unknown): Promise<TtsResult> {
+    async synthesize(raw: unknown, opts?: TtsRequestOptions): Promise<TtsResult> {
       const check = checkText(raw);
       if (!check.ok) return { ok: false, status: check.status, reason: check.reason };
       const record = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : null;
@@ -544,17 +558,17 @@ export function createTtsRouter(options: TtsRouterOptions): TtsRouter {
       const lang = parseLang(record?.lang);
       const routed = containsCjk(check.text) ? "zh" : "en";
       log(`[tts] route=${routed} lang=${lang ?? "-"} chars=${check.text.length}`);
-      return routed === "zh" ? synthesizeEdge(check.text) : synthesizeEnglish(check.text);
+      return routed === "zh" ? synthesizeEdge(check.text, opts?.signal) : synthesizeEnglish(check.text, opts?.signal);
     },
 
-    async synthesizeStream(raw: unknown): Promise<TtsStreamResult> {
+    async synthesizeStream(raw: unknown, opts?: TtsRequestOptions): Promise<TtsStreamResult> {
       const check = checkText(raw);
       if (!check.ok) return { ok: false, status: check.status, reason: check.reason };
       const routed = containsCjk(check.text) ? "zh" : "en";
-      if (routed === "zh") return streamEdge(check.text);
+      if (routed === "zh") return streamEdge(check.text, opts?.signal);
       // 英文那一路（Deepgram）没有流式接口：仍然是整块拿到再一次吐出。
       // 不是「假装流式」—— `chunks` 只有一个分片，客户端拿到的时序与不带 stream 一样。
-      const result = await synthesizeEnglish(check.text);
+      const result = await synthesizeEnglish(check.text, opts?.signal);
       if (!result.ok) return { ok: false, status: result.status, reason: result.reason };
       return { ok: true, mime: result.mime, source: "buffer", chunks: singleChunk(result.bytes) };
     },

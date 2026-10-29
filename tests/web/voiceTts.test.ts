@@ -130,7 +130,9 @@ describe("RoutedTTS", () => {
     tts.flush();
     await tick();
 
-    expect(requests).toEqual(["The rain outside."]);
+    // 预热（"ok"）先发一次：它不是台词请求，台词请求仍然只有那一句
+    expect(requests.filter((text) => text !== "ok")).toEqual(["The rain outside."]);
+    expect(requests.length).toBe(2); // 预热 1 次 + 台词 1 次
     expect(started.length).toBe(1); // 分片确实被解码并排队播放
     expect(tts.lastError).toBeNull();
     tts.dispose();
