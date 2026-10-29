@@ -26,7 +26,11 @@
  */
 
 import type { DeepgramConfig, DashscopeConfig } from "./config.ts";
-import { createAliSttBridge, type EncoderFactory } from "./aliStt.ts";
+import {
+  createAliSttBridgeForModel,
+  type EncoderFactory,
+  type StreamingEncoderFactory,
+} from "./aliStt.ts";
 
 /** 中文只能用 nova-2：nova-3 对中文返回空结果（实测）。 */
 export const STT_MODEL = "nova-2";
@@ -208,6 +212,8 @@ export interface SttBridgeOptions {
   flushTimeoutMs?: number;
   /** 阿里通道的转码器工厂（测试注入假的，不依赖真实 ffmpeg） */
   encoder?: EncoderFactory;
+  /** 阿里**流式**通道的转码器工厂（测试注入假的，不依赖真实 ffmpeg） */
+  streamEncoder?: StreamingEncoderFactory;
 }
 
 export interface SttBridge {
@@ -252,10 +258,11 @@ export function createSttBridge(options: SttBridgeOptions): SttBridge {
   const flushTimeoutMs = options.flushTimeoutMs ?? FLUSH_TIMEOUT_MS;
 
   // ── provider 选择（浏览器端协议不变：还是同一套 SttClientMessage）──
-  // 配了 DASHSCOPE_API_KEY 就走阿里百炼 fun-asr；否则回退 Deepgram 老逻辑。
+  // 配了 DASHSCOPE_API_KEY 就走阿里百炼（默认**真流式** qwen-audio-3.0-asr-flash-streaming；
+  // `ALI_ASR_MODEL=fun-asr-flash-2026-06-15` 可切回整段识别）。
   // 为什么不放浏览器选：key 一旦进浏览器就等于泄漏，必须服务端代理（见文件头）。
   if (options.dashscope) {
-    return createAliSttBridge({
+    return createAliSttBridgeForModel({
       apiKey: options.dashscope.apiKey,
       wsUrl: options.dashscope.wsUrl,
       model: options.dashscope.model,
@@ -265,6 +272,7 @@ export function createSttBridge(options: SttBridgeOptions): SttBridge {
       format: options.format,
       log,
       encoder: options.encoder,
+      streamEncoder: options.streamEncoder,
     });
   }
   const dgConfig = options.config;

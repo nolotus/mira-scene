@@ -9,6 +9,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import {
+  ALI_ASR_FALLBACK_MODEL,
   ALI_ASR_MODEL,
   ALI_ASR_WS_URL,
   createAliSttBridge,
@@ -287,9 +288,9 @@ describe("阿里通道：webm 字节 → final 文本", () => {
     const socket = sockets[0]!;
     expect(socket.audio.length).toBe(1);
     expect(socket.sent.some((s) => typeof s === "string" && s.includes("finish-task"))).toBe(true);
-    // run-task 的报文里模型名要对
+    // run-task 的报文里模型名要对（整段路径用的是**回退**模型）
     const runTask = socket.sent.find((s) => typeof s === "string" && s.includes("run-task"));
-    expect(typeof runTask === "string" && runTask.includes(ALI_ASR_MODEL)).toBe(true);
+    expect(typeof runTask === "string" && runTask.includes(ALI_ASR_FALLBACK_MODEL)).toBe(true);
   });
 
   test("没有音频时收尾：不发 final，也不炸", async () => {

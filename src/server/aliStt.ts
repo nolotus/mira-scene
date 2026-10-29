@@ -1,27 +1,37 @@
 /**
- * 语音识别（STT）provider：**阿里百炼 fun-asr**（Deepgram key 被吊销后的回退通道）。
+ * 语音识别（STT）provider：**阿里百炼**（Deepgram key 被吊销后的回退通道）。
  *
  * 为什么要有第二条通道：Deepgram 的 key 一旦被吊销，浏览器端就彻底没有语音输入了。
- * 阿里百炼的 fun-asr 是同形态的实时 WS 协议（但**不是**同一套报文），所以只能在**服务端**
+ * 阿里百炼是同形态的实时 WS 协议（但**不是**同一套报文），所以只能在**服务端**
  * 做 provider 选择 —— 浏览器侧的协议（`SttClientMessage`：interim / final / speech_started /
  * utterance_end / error / capabilities）保持不变，客户端**感知不到**换了供应商。
  *
+ * ── 两条路径（按模型名分发，见 `createAliSttBridgeForModel`）──
+ *   · **真流式**（默认，`qwen-audio-3.0-asr-flash-streaming`）：
+ *     webm 块 → ffmpeg **边收边转** → 边转边喂上游 → 上游**边说边出字**（interim）。
+ *     实现见本文件末尾「真流式路径」段。
+ *   · **整段识别**（回退，`fun-asr-flash-2026-06-15`）：
+ *     攒完整段 → 转 wav → 整段送上游 → **一条** final（没有 interim）。
+ *     实现见 `createAliSttBridge`（本文件前半部分）。
+ *   切换方式：`ALI_ASR_MODEL=fun-asr-flash-2026-06-15`。
+ *
  * ── 与 Deepgram 的三点实质差异（踩坑前先看这里）──
- *   1. **整段识别**：fun-asr-flash 不发 interim，也不发 speech_started；整段音频发完
- *      才出**一条**完整文本（约 +120~170ms），并且**不发 task-finished ——
- *      拿到 `sentence_end` 就算完。
- *   2. **不吃 webm 容器**（实测 `format=webm` 直接断连）：浏览器送的是 MediaRecorder 的
- *      webm/opus，所以服务端必须先把整段音频转成 **wav 16k mono** 再送。
- *   3. **不发 speech_started**：这是「打断」链路的唯一缺口。本模块**不伪造**它 ——
+ *   1. **不发 speech_started**：这是「打断」链路的唯一缺口。本模块**不伪造**它 ——
  *      伪造一个假的 speech_started 会让 bargeIn 在错误时机触发打断，比没有更糟。
  *      改为**显式上报能力**（`capabilities` 首帧 + `/api/voice/status`）：
  *      `supportsSpeechStarted:false` → 客户端改走 energy VAD（保留 AEC / 回声门禁）。
+ *   2. **不吃 webm 容器**（实测 `format=webm` 直接断连）：浏览器送的是 MediaRecorder 的
+ *      webm/opus，所以服务端必须先转成 16k mono PCM 再送。
+ *      **整段路径**转成 wav；**流式路径**转成裸 PCM（s16le，流式管道里写不出 wav 头）。
+ *   3. **模型要显式声明**：`run-task` 的 `parameters` 里要带 `format` / `sample_rate`
+ *      （流式那条还要 `type:"realtime"`）。
  *
- * ── 时序（为什么这么写）──
- *   浏览器 MediaRecorder 每 100ms 一块 → 服务端**攒着**（不逐块转发：上游要整段 wav）→
- *   收到「这句说完了」(`finish_utterance`) → ffmpeg 转 wav → 送上游 → 收一条 final → 回客户端。
- *   为了守住延迟预算，上游 WS 连接**提前建好**（prewarm），ffmpeg 进程也在第一块音频到达时
- *   就起好、边收边解 —— 收尾时只剩「关管道 + 等上游出文本」。
+ * ── 时序 ──
+ *   · 流式：每 100ms 一块 → ffmpeg 边收边转 → 边转边喂上游 → 上游持续回 interim；
+ *     收到「这句说完了」(`finish_utterance`) → 关 ffmpeg 输入 + `finish-task` → final。
+ *   · 整段：每 100ms 一块 → 服务端**攒着** → `finish_utterance` → ffmpeg 转 wav →
+ *     送上游 → 收一条 final → 回客户端。
+ *   两条路径都在第一块音频到达时就起好上游连接（prewarm）与 ffmpeg 进程。
  *
  * ── 句子的边界**只**由显式 `finish_utterance` 决定 ──
  *   旧实现用「数据包间隔 > 120ms」猜「这句说完了」。那是错的：浏览器每 100ms 一块，
@@ -32,7 +42,7 @@
  *
  * ── 预算：到点必须有结论 ──
  *   每个阶段都有硬上限，超了就是**明确的失败**（给客户端 error），绝不静默丢句：
- *     · 握手/预热：从连接创建起 15s 内没有 task-started → `upstream-not-ready`；
+ *     · 握手/预热：15s 内没有 task-started → `upstream-not-ready`；
  *     · 收尾（转码 + 上游往返）：从收尾起 15s 内没有 final → `timeout`；
  *     · 结果等待：送出音频后 15s 内没有终稿 → `result-timeout`（客户端据此回退）；
  *     · 累积：单句绝对时长 60s 兜底 → 到点强制收尾，给 final（不是错误）。
@@ -62,8 +72,28 @@ import type { BrowserSink, SttBridge, SttClientMessage, UpstreamConnect, Upstrea
 
 /** 阿里百炼 WS 入口（实测可用） */
 export const ALI_ASR_WS_URL = "wss://llm-591oew115u3ce1c0.cn-beijing.maas.aliyuncs.com/api-ws/v1/inference";
-/** 实测通过的模型：fun-asr-flash（中文可用，整段识别） */
-export const ALI_ASR_MODEL = "fun-asr-flash-2026-06-15";
+/**
+ * 默认模型：**真流式**（`qwen-audio-3.0-asr-flash-streaming`）。
+ *
+ * 与整段识别的本质区别：它会**边说边出字**（`result-generated` 持续增长），
+ * 所以浏览器侧能看见字在长，而不是等整句说完才蹦出一整条。
+ */
+export const ALI_ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming";
+/**
+ * 整段识别模型（**可配置回退**）：攒完整段才出**一条**文本，不发 interim。
+ * 用 `ALI_ASR_MODEL=fun-asr-flash-2026-06-15` 就能切回它。
+ */
+export const ALI_ASR_FALLBACK_MODEL = "fun-asr-flash-2026-06-15";
+/**
+ * 流式模型要的音频格式：裸 PCM（s16le / 16k / mono）。
+ *
+ * 为什么不是 "wav"：我们从 ffmpeg stdout 拿到的是**没有文件头**的连续 PCM
+ * （流式管道里长度字段根本写不出来），发一个假 wav 头反而会让上游按错误的
+ * 长度去读。裸 PCM 没有长度字段，正是流式该有的样子。
+ */
+export const ALI_ASR_STREAM_FORMAT = "pcm";
+/** 流式模型的额外参数（实测通过的 run-task 配置） */
+export const ALI_ASR_STREAM_TYPE = "realtime";
 /** 上游只认 wav；采样率必须与参数里声明的一致 */
 export const ALI_ASR_SAMPLE_RATE = 16000;
 /** 客户端 legacy 的 linear16 流的采样率（只用于「直接送 PCM」那条老路） */
@@ -181,8 +211,17 @@ export function parseAliEvent(raw: string): AliEvent {
   return { kind: "other", event: event || "unknown" };
 }
 
-/** 上游连接握手的请求体（实测可用，参数别乱改） */
-export function aliRunTaskMessage(taskId: string, model: string): string {
+/**
+ * 上游连接握手的请求体（实测可用，参数别乱改）。
+ *
+ * `parameters` 可覆盖：流式模型要 `format:"pcm"` + `type:"realtime"`，
+ * 整段模型要 `format:"wav"`。默认给整段那套（历史行为不变）。
+ */
+export function aliRunTaskMessage(
+  taskId: string,
+  model: string,
+  parameters?: Record<string, unknown>,
+): string {
   return JSON.stringify({
     header: { action: "run-task", task_id: taskId, streaming: "duplex" },
     payload: {
@@ -190,10 +229,30 @@ export function aliRunTaskMessage(taskId: string, model: string): string {
       task: "asr",
       function: "recognition",
       model,
-      parameters: { format: "wav", sample_rate: ALI_ASR_SAMPLE_RATE },
+      parameters: parameters ?? { format: "wav", sample_rate: ALI_ASR_SAMPLE_RATE },
       input: {},
     },
   });
+}
+
+/** 流式模型的 run-task 参数（实测通过） */
+export function aliStreamParameters(): Record<string, unknown> {
+  return {
+    format: ALI_ASR_STREAM_FORMAT,
+    sample_rate: ALI_ASR_SAMPLE_RATE,
+    type: ALI_ASR_STREAM_TYPE,
+  };
+}
+
+/**
+ * 这个模型名是不是走**真流式**路径。
+ *
+ * 判定规则：显式等于流式模型，或名字里带 "streaming"。
+ * 没给模型名 = 默认流式（配置里 `ALI_ASR_MODEL` 的默认值就是它）。
+ */
+export function isStreamingAsrModel(model: string | null | undefined): boolean {
+  if (!model) return true;
+  return model === ALI_ASR_MODEL || model.includes("streaming");
 }
 
 /** 收尾请求：告诉上游「音频发完了，出终稿」 */
@@ -438,6 +497,8 @@ export interface AliSttOptions {
   log?: (line: string) => void;
   /** 转码器工厂（测试注入假的，不依赖真实 ffmpeg） */
   encoder?: EncoderFactory;
+  /** 流式转码器工厂（测试注入假的；只给流式路径用） */
+  streamEncoder?: StreamingEncoderFactory;
   /** 单阶段硬预算（ms）：预热/握手、收尾、结果等待共用 */
   totalBudgetMs?: number;
   /** 单句绝对时长上限（ms）：到点强制收尾 */
@@ -448,6 +509,8 @@ export interface AliSttOptions {
   maxFrames?: number;
   /** 转码输出上限（字节） */
   maxWavBytes?: number;
+  /** 流式路径的 PCM 输出上限（字节） */
+  maxPcmBytes?: number;
   /** 同时存在的会话上限 */
   maxSessions?: number;
 }
@@ -474,15 +537,18 @@ export function aliActiveSessions(): number {
 }
 
 /**
- * 建立一条阿里通道的桥。
+ * 建立一条阿里通道的桥（**整段识别**路径）。
  *
  * 与 Deepgram 桥的**对外行为一致**（同一套 SttBridge 接口、同一套客户端消息），
  * 差别只在内部：攒音频 → 转 wav → 整段送上游 → 一条 final。
+ *
+ * 注意：这个工厂**只**是整段路径。默认的流式路径走 `createAliStreamingSttBridge`
+ * （由 `createAliSttBridgeForModel` 按模型名分发）。
  */
 export function createAliSttBridge(options: AliSttOptions): SttBridge {
   const log = options.log ?? ((line: string) => console.warn(line));
   const wsUrl = options.wsUrl ?? ALI_ASR_WS_URL;
-  const model = options.model ?? ALI_ASR_MODEL;
+  const model = options.model ?? ALI_ASR_FALLBACK_MODEL;
   const makeEncoder = options.encoder ?? createFfmpegEncoder;
   const totalBudgetMs = options.totalBudgetMs ?? ALI_TOTAL_BUDGET_MS;
   const maxUtteranceMs = options.maxUtteranceMs ?? ALI_MAX_UTTERANCE_MS;
@@ -1084,4 +1150,865 @@ export function createAliSttBridge(options: AliSttOptions): SttBridge {
       return lastEvent;
     },
   };
+}
+
+// ==================================================================
+// 真流式路径（qwen-audio-3.0-asr-flash-streaming）
+//
+// ── 与整段路径的本质区别 ──
+//   整段：攒完整段 → 转 wav → 送上游 → **一条** final（用户全程看不到字在长）。
+//   流式：webm 块 → ffmpeg **边收边转** → 边转边喂上游 → 上游**边说边出字**
+//         （`result-generated` 持续增长）→ interim 推浏览器 → 句末发 final。
+//
+// ── 为什么这次能「边收边转」 ──
+//   之前失败不是 ffmpeg 做不到，而是**没告诉它输入是什么格式**：
+//   MediaRecorder 的第一块只有 176B 的 EBML 头，靠自动探测会直接
+//   「Invalid data found」失败。**显式 `-f webm`** 之后，ffmpeg 就能在管道上
+//   边收边解（实测：按真实速率喂，首字节输出 ~80ms，输出粒度 1920B = 60ms 音频）。
+//
+// ── 与整段路径共享的纪律（一都不能少）──
+//   · ffmpeg 是子进程：任何收尾路径都必须 kill，且幂等；
+//   · 会话级资源上限（原始字节 / 帧数 / 转码输出 / 并发会话）→ 明确 error；
+//   · 分阶段硬预算（握手 / 收尾 / 等终稿）→ 到点必须有结论；
+//   · 所有失败都透出 `error`，绝不静默丢句；
+//   · 句子边界**只**由显式 finish_utterance 决定（帧间隔不参与判断）。
+// ==================================================================
+
+/**
+ * 流式转码器：喂进原始字节，**边喂边**吐出 16k mono s16le PCM。
+ */
+export interface StreamingAudioEncoder {
+  /** 喂一块原始音频（webm 分块）。抛异常 = 转码起不来 */
+  write(chunk: Uint8Array): void | Promise<void>;
+  /**
+   * 关闭输入并等 ffmpeg 退出。返回时 stdout 的数据已经**全部**回调完。
+   *
+   * 不抛异常：ffmpeg 非零退出要不要报错，由调用方按「有没有拿到 PCM」判断
+   * （录到的 webm 常常没有 cues/时长，ffmpeg 收尾时可能报个无关紧要的错，
+   *  但音频本身是好的 —— 这种情况下不能把整句丢掉）。
+   */
+  finish(): Promise<{ ok: boolean; code: number; detail: string }>;
+  /** 幂等：杀掉子进程 */
+  kill(): void;
+  /** PCM 回调（分块，粒度 ~1920B = 60ms 音频） */
+  onData(cb: (chunk: Uint8Array) => void): void;
+  /** 致命错误（stdout 读挂了之类） */
+  onError(cb: (error: Error) => void): void;
+}
+
+export type StreamingEncoderFactory = (input: "webm-opus" | "linear16") => StreamingAudioEncoder;
+
+/**
+ * ffmpeg **流式**转码器：webm → 16k mono s16le PCM，边喂边出。
+ *
+ * 关键参数只有一个是新的：**`-f webm`**（显式声明输入格式）。
+ * 少了它，ffmpeg 会走自动探测，而 MediaRecorder 的第一块只有 EBML 头 → 直接失败。
+ *
+ * 进程纪律与整段那套一致：
+ *   · spawn 是懒的（第一次 write 才起），「已 spawn 未 attach」的窗口就在 write 里；
+ *   · stdout 必须**边读边转发**（等 finish 再读 = 整段识别，等于白改）；
+ *   · stderr 必须读掉（管道写满会让 ffmpeg 卡死），只留 400 字节尾巴给日志；
+ *   · kill 幂等。
+ */
+export function createStreamingFfmpegEncoder(
+  input: "webm-opus" | "linear16" = "webm-opus",
+): StreamingAudioEncoder {
+  const args = ["ffmpeg", "-hide_banner", "-loglevel", "error"];
+  if (input === "linear16") {
+    args.push("-f", "s16le", "-ar", String(ALI_PCM_INPUT_RATE), "-ac", "1");
+  } else {
+    // **必须显式 -f webm**：MediaRecorder 的第一块只有 EBML 头，自动探测会失败
+    args.push("-f", "webm");
+  }
+  args.push(
+    "-i",
+    "pipe:0",
+    "-ar",
+    String(ALI_ASR_SAMPLE_RATE),
+    "-ac",
+    "1",
+    "-f",
+    "s16le",
+    "pipe:1",
+  );
+
+  let proc: ReturnType<typeof Bun.spawn> | null = null;
+  let exited = false;
+  let killed = false;
+  let dataCb: ((chunk: Uint8Array) => void) | null = null;
+  let errorCb: ((error: Error) => void) | null = null;
+  let stderrTail = "";
+  let readDone: Promise<void> = Promise.resolve();
+
+  interface PipeSink {
+    write(chunk: Uint8Array): number | Promise<number>;
+    flush(): void;
+    end(): void;
+  }
+  const stdinOf = (child: ReturnType<typeof Bun.spawn>): PipeSink =>
+    child.stdin as unknown as PipeSink;
+  const stdoutOf = (child: ReturnType<typeof Bun.spawn>): ReadableStream<Uint8Array> =>
+    child.stdout as unknown as ReadableStream<Uint8Array>;
+  const stderrOf = (child: ReturnType<typeof Bun.spawn>): ReadableStream<Uint8Array> =>
+    child.stderr as unknown as ReadableStream<Uint8Array>;
+
+  const spawn = (): ReturnType<typeof Bun.spawn> => {
+    if (proc) return proc;
+    const child = Bun.spawn(args, { stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    proc = child;
+
+    // stdout：**边读边转发**（不能等 finish 再读 —— 那等于整段识别）
+    readDone = (async () => {
+      const reader = stdoutOf(child).getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value && value.byteLength > 0) dataCb?.(value);
+        }
+      } catch (error) {
+        // 进程被 kill 是正常收尾路径；只有「没被 kill 还读挂了」才算致命
+        if (!killed) {
+          errorCb?.(error instanceof Error ? error : new Error("ffmpeg stdout read failed"));
+        }
+      }
+    })();
+
+    // stderr：必须读掉（管道写满会让 ffmpeg 卡死），只留尾巴给日志
+    void (async () => {
+      const reader = stderrOf(child).getReader();
+      const decoder = new TextDecoder();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) stderrTail = (stderrTail + decoder.decode(value, { stream: true })).slice(-400);
+        }
+      } catch {
+        /* 忽略 */
+      }
+    })();
+
+    return child;
+  };
+
+  return {
+    async write(chunk): Promise<void> {
+      if (killed || exited) return;
+      if (chunk.byteLength === 0) return;
+      // ffmpeg 不存在 → 这里抛（上层必须接住并报 audio-encode-failed）
+      const child = spawn();
+      // 管道容量有限（64KB）：write() 可能只写进去一部分，必须循环写完
+      let offset = 0;
+      let stalled = 0;
+      while (offset < chunk.byteLength) {
+        const piece = chunk.subarray(offset);
+        let written = 0;
+        try {
+          const result = stdinOf(child).write(piece);
+          written = typeof result === "number" ? result : await result;
+        } catch {
+          // 管道写失败（ffmpeg 已退出）：交给 finish() 用退出码报错
+          break;
+        }
+        if (written <= 0) {
+          stalled += 1;
+          if (stalled > 3) break;
+          continue;
+        }
+        stalled = 0;
+        offset += written;
+        try {
+          stdinOf(child).flush();
+        } catch {
+          break;
+        }
+      }
+    },
+
+    async finish() {
+      const child = proc;
+      if (!child) return { ok: true, code: 0, detail: "" };
+      try {
+        stdinOf(child).end();
+      } catch {
+        /* 已经关了 */
+      }
+      const code = await child.exited;
+      await readDone;
+      exited = true;
+      const detail = stderrTail.trim().slice(0, 200);
+      return { ok: code === 0, code, detail };
+    },
+
+    kill() {
+      if (killed) return;
+      killed = true;
+      const child = proc;
+      proc = null;
+      if (!child || exited) return;
+      try {
+        child.kill();
+      } catch {
+        /* 已经死了 */
+      }
+    },
+
+    onData(cb) {
+      dataCb = cb;
+    },
+    onError(cb) {
+      errorCb = cb;
+    },
+  };
+}
+
+/** 等某个条件成立（带上限）：流式路径的等待都走这里，统一受预算约束 */
+function waitForCondition(predicate: () => boolean, deadline: number): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    if (predicate()) {
+      resolve(true);
+      return;
+    }
+    const tick = (): void => {
+      if (predicate()) {
+        resolve(true);
+        return;
+      }
+      if (Date.now() > deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(tick, 20);
+    };
+    tick();
+  });
+}
+
+/**
+ * 建立一条**真流式**的阿里通道（qwen-audio-3.0-asr-flash-streaming）。
+ *
+ * 对外行为与整段路径**完全一致**（同一套 SttBridge / SttClientMessage）：
+ * 浏览器侧不需要改任何东西 —— 它本来就会处理 interim / final。
+ * 唯一的能力差异照旧：`supportsSpeechStarted:false`（上游不发 speech_started）。
+ */
+export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
+  const log = options.log ?? ((line: string) => console.warn(line));
+  const wsUrl = options.wsUrl ?? ALI_ASR_WS_URL;
+  const model = options.model ?? ALI_ASR_MODEL;
+  const makeEncoder = options.streamEncoder ?? createStreamingFfmpegEncoder;
+  const totalBudgetMs = options.totalBudgetMs ?? ALI_TOTAL_BUDGET_MS;
+  const maxUtteranceMs = options.maxUtteranceMs ?? ALI_MAX_UTTERANCE_MS;
+  const resultTimeoutMs = options.resultTimeoutMs ?? ALI_RESULT_TIMEOUT_MS;
+  const maxFrames = options.maxFrames ?? ALI_MAX_FRAMES;
+  const maxPcmBytes = options.maxPcmBytes ?? ALI_MAX_WAV_BYTES;
+  const maxSessions = options.maxSessions ?? ALI_MAX_SESSIONS;
+
+  let closed = false;
+  /** 收尾态：客户端已经走了 → 不再新建上游连接 */
+  let tearingDown = false;
+  let frames = 0;
+  let bytes = 0;
+  let lastEvent: string | null = null;
+
+  // ── 「这句」的状态（每句重置）──
+  let utteranceActive = false;
+  let frameCount = 0;
+  let rawBytes = 0;
+  let pcmBytes = 0;
+  /** 已闭合句子的拼接 */
+  let completedText = "";
+  /** 当前（未闭合）句子的最新文本 */
+  let currentText = "";
+  /** 上次推给客户端的 interim（去重） */
+  let lastInterim = "";
+  /** 这句的 final 是否已发（一句只发一次 —— 否则客户端会提交两次） */
+  let finalSent = false;
+  /** 客户端说了「这句说完了」 */
+  let finishRequested = false;
+  /** 上游给过 sentence_end */
+  let sentenceEnded = false;
+  /** 上游发过 task-finished */
+  let taskFinished = false;
+
+  /** 当前这句的流式转码器 */
+  let encoder: StreamingAudioEncoder | null = null;
+  /** 写链：保证 webm 块按顺序进 ffmpeg（顺带做了背压） */
+  let writeChain: Promise<void> = Promise.resolve();
+
+  let upstream: UpstreamTask | null = null;
+  /** 上游 task 已就绪（task-started 已到）→ 可以发 PCM 了 */
+  let taskReady = false;
+  /** 正在启动 task（避免并发发 run-task） */
+  let taskStarting: Promise<boolean> | null = null;
+  /** task 就绪前攒下的 PCM（顺序不变，补发时按序送） */
+  const pendingPcm: Uint8Array[] = [];
+
+  let utteranceTimer: ReturnType<typeof setTimeout> | null = null;
+  let resultTimer: ReturnType<typeof setTimeout> | null = null;
+  let finalizeTimer: ReturnType<typeof setTimeout> | null = null;
+  /** task-finished 之后给终稿留的宽限（最后一条 result 可能跟在后面） */
+  let finalGraceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 等 final 的等待者 */
+  let finalWaiter: (() => void) | null = null;
+  /** 收尾是否已经在跑 */
+  let running = false;
+  let queued: { reason: string; keep: boolean } | null = null;
+
+  const clearTimer = (timer: ReturnType<typeof setTimeout> | null): null => {
+    if (timer !== null) clearTimeout(timer);
+    return null;
+  };
+
+  const sinkSend = (message: SttClientMessage): void => {
+    if (closed && message.type !== "error") return;
+    try {
+      options.sink.sendText(JSON.stringify(message));
+    } catch {
+      // 浏览器侧已经没了：按断开处理
+      shutdown(1001, "client gone");
+    }
+  };
+
+  const killEncoder = (): void => {
+    const enc = encoder;
+    encoder = null;
+    if (!enc) return;
+    try {
+      enc.kill();
+    } catch {
+      /* 已经死了 */
+    }
+  };
+
+  const closeUpstream = (): void => {
+    const current = upstream;
+    upstream = null;
+    if (!current) return;
+    try {
+      current.socket.close(1000, "segment done");
+    } catch {
+      /* 可能已经关了 */
+    }
+  };
+
+  const shutdown = (code: number, reason: string): void => {
+    if (closed) return;
+    closed = true;
+    utteranceTimer = clearTimer(utteranceTimer);
+    resultTimer = clearTimer(resultTimer);
+    finalizeTimer = clearTimer(finalizeTimer);
+    finalGraceTimer = clearTimer(finalGraceTimer);
+    pendingPcm.length = 0;
+    // 进程纪律：收摊时 ffmpeg 必须死
+    killEncoder();
+    closeUpstream();
+    // 别让等待者挂着
+    if (finalWaiter) {
+      const waiter = finalWaiter;
+      finalWaiter = null;
+      waiter();
+    }
+    activeSessions = Math.max(0, activeSessions - 1);
+    try {
+      options.sink.close(code, reason);
+    } catch {
+      /* 浏览器侧可能已经关了 */
+    }
+    log(
+      `[stt:ali:stream] closed frames=${frames} bytes=${bytes} pcm=${pcmBytes} reason=${reason} lastEvent=${lastEvent ?? "none"}`,
+    );
+  };
+
+  /** 发 final（一句只发一次） */
+  const emitFinal = (): void => {
+    if (finalSent || closed) return;
+    const text = `${completedText}${currentText}`.trim();
+    if (!text) return;
+    finalSent = true;
+    sinkSend({ type: "final", text });
+    if (finalWaiter) {
+      const waiter = finalWaiter;
+      finalWaiter = null;
+      waiter();
+    }
+  };
+
+  /**
+   * 上游的识别结果 → 落进「已闭合句子 / 当前句子」两个桶，并推 interim。
+   *
+   * 上游的 `sentence.text` 是**当前这句的累计文本**（会越来越长）。
+   * 所以：
+   *   · 没带 sentence_end → 它就是「正在说的这句」，推 interim；
+   *   · 带了 sentence_end → 这句闭合了，挪进 completed（后续句子另起）。
+   */
+  const onResult = (text: string, sentenceEnd: boolean): void => {
+    if (closed) return;
+    if (sentenceEnd) {
+      sentenceEnded = true;
+      if (text && !completedText.endsWith(text)) completedText += text;
+      currentText = "";
+    } else if (text) {
+      currentText = text;
+    }
+    const shown = `${completedText}${currentText}`;
+    if (shown && shown !== lastInterim) {
+      lastInterim = shown;
+      sinkSend({ type: "interim", text: shown });
+    }
+    // 客户端已经说了「这句说完了」→ 这一句的 final 现在就能给
+    if (sentenceEnd && finishRequested) emitFinal();
+  };
+
+  const sendPcm = (chunk: Uint8Array): void => {
+    const task = upstream;
+    if (!task || closed) return;
+    try {
+      task.socket.send(chunk);
+    } catch {
+      sinkSend({ type: "error", reason: "upstream-error" });
+      shutdown(1011, "upstream send failed");
+    }
+  };
+
+  const onPcm = (chunk: Uint8Array): void => {
+    if (closed) return;
+    pcmBytes += chunk.byteLength;
+    // 会话级资源上限：转码输出也算内存，超了就是明确的失败
+    if (pcmBytes > maxPcmBytes) {
+      sinkSend({ type: "error", reason: "transcode-too-large" });
+      shutdown(1009, "transcoded audio too large");
+      return;
+    }
+    if (!taskReady) {
+      // task 还没就绪：先攒着（task-started 通常 ~200ms 到，这段音频本来就该等）
+      pendingPcm.push(chunk);
+      return;
+    }
+    sendPcm(chunk);
+  };
+
+  const openUpstream = (): void => {
+    if (closed || tearingDown || upstream) return;
+    const taskId = crypto.randomUUID();
+    let socket: UpstreamSocket;
+    try {
+      socket = options.connect(wsUrl, {
+        // key 只出现在这里：不写日志、不进 URL、不回响应
+        Authorization: `Bearer ${options.apiKey}`,
+      });
+    } catch {
+      log("[stt:ali:stream] connect threw");
+      upstream = null;
+      return;
+    }
+    const task: UpstreamTask = {
+      socket,
+      taskId,
+      opened: false,
+      ready: false,
+      runTaskSent: false,
+      deadline: Date.now() + totalBudgetMs,
+    };
+    upstream = task;
+
+    socket.onopen = () => {
+      if (closed || upstream !== task) return;
+      // 连接层就绪。**不**在这里发 run-task（任务必须在音频就绪那一刻才创建）
+      task.opened = true;
+    };
+
+    socket.onmessage = (event) => {
+      if (closed || upstream !== task) return;
+      if (typeof event.data !== "string") return;
+      const parsed = parseAliEvent(event.data);
+      lastEvent = parsed.kind === "other" ? `other:${parsed.event}` : parsed.kind;
+      if (parsed.kind === "task-started") {
+        task.ready = true;
+        log("[stt:ali:stream] task-started");
+        return;
+      }
+      if (parsed.kind === "result") {
+        onResult(parsed.text, parsed.sentenceEnd);
+        return;
+      }
+      if (parsed.kind === "error") {
+        log(`[stt:ali:stream] upstream error detail=${parsed.reason.slice(0, 120)}`);
+        sinkSend({ type: "error", reason: "upstream-error" });
+        shutdown(1000, "upstream error");
+        return;
+      }
+      if (parsed.kind === "task-finished") {
+        // 流式模型**会**发 task-finished（整段那套不发）——这是「整句完了」的权威信号。
+        // 但最后一条 result 可能跟在它后面，所以留 150ms 宽限再发 final，
+        // 否则可能发出半句。
+        taskFinished = true;
+        if (finalGraceTimer === null) {
+          finalGraceTimer = setTimeout(() => {
+            finalGraceTimer = null;
+            emitFinal();
+          }, 150);
+        }
+      }
+    };
+
+    socket.onclose = () => {
+      if (closed || upstream !== task) return;
+      upstream = null;
+      // 空闲的预热连接被对端关掉（还没创建 task）：不是错误 —— 收尾时会重连
+      if (!task.runTaskSent) {
+        log("[stt:ali:stream] idle prewarm connection closed");
+        return;
+      }
+      // 没拿到结果就断了：客户端必须收到收摊信号，否则它会一直等字幕
+      if (!finalSent) {
+        sinkSend({ type: "error", reason: "upstream-closed" });
+        shutdown(1000, "upstream closed");
+      }
+    };
+
+    socket.onerror = () => {
+      if (closed || upstream !== task) return;
+      sinkSend({ type: "error", reason: "upstream-error" });
+      shutdown(1011, "upstream error");
+    };
+  };
+
+  /** 真正去启动上游 task（run-task → 等 task-started） */
+  const startTaskInner = async (): Promise<boolean> => {
+    if (closed) return false;
+    if (!upstream) openUpstream();
+    const task = upstream;
+    if (!task) return false;
+    // 握手预算：从**音频就绪**这一刻起算（预热阶段不算在这里）
+    const deadline = Date.now() + totalBudgetMs;
+    const waitDeadline = deadline - 30;
+    if (!task.opened) {
+      const opened = await waitForCondition(() => task.opened, waitDeadline);
+      if (!opened || closed) return false;
+    }
+    if (!task.runTaskSent) {
+      task.runTaskSent = true;
+      try {
+        task.socket.send(aliRunTaskMessage(task.taskId, model, aliStreamParameters()));
+      } catch {
+        return false;
+      }
+    }
+    const ready = await waitForCondition(() => task.ready, waitDeadline);
+    if (!ready || closed) return false;
+    taskReady = true;
+    // 把攒着的 PCM 按序补发
+    for (const chunk of pendingPcm) sendPcm(chunk);
+    pendingPcm.length = 0;
+    return true;
+  };
+
+  /** 确保上游 task 已就绪（并发调用只会启动一次） */
+  const ensureTaskStarted = (): Promise<boolean> => {
+    if (closed) return Promise.resolve(false);
+    if (taskReady) return Promise.resolve(true);
+    if (taskStarting) return taskStarting;
+    const run = startTaskInner();
+    taskStarting = run;
+    void run
+      .catch(() => false)
+      .finally(() => {
+        if (taskStarting === run) taskStarting = null;
+      });
+    return run;
+  };
+
+  const ensureEncoder = (): StreamingAudioEncoder => {
+    if (encoder) return encoder;
+    const input = options.format === "linear16" ? "linear16" : "webm-opus";
+    const enc = makeEncoder(input);
+    enc.onData(onPcm);
+    enc.onError(() => {
+      log("[stt:ali:stream] ffmpeg stream error");
+      sinkSend({ type: "error", reason: "audio-encode-failed" });
+      shutdown(1011, "audio encode failed");
+    });
+    encoder = enc;
+    return enc;
+  };
+
+  /** 新的一句：重置「这句」的状态 + 起 ffmpeg + 起上游 task */
+  const beginUtterance = (): StreamingAudioEncoder => {
+    utteranceActive = true;
+    frameCount = 0;
+    rawBytes = 0;
+    pcmBytes = 0;
+    completedText = "";
+    currentText = "";
+    lastInterim = "";
+    finalSent = false;
+    finishRequested = false;
+    sentenceEnded = false;
+    taskFinished = false;
+    taskReady = false;
+    taskStarting = null;
+    pendingPcm.length = 0;
+    // 上游连接：预热的那条**直接复用**（预热的意义就是省掉这句的握手时间）。
+    // 只有它已经被对端关掉（空闲超时）时才重连。
+    if (!upstream) openUpstream();
+    const enc = ensureEncoder();
+    // task 在**音频就绪**这一刻创建（预热的 task 收不到音频会被判 task-failed）
+    void ensureTaskStarted().then((ready) => {
+      if (!ready && !closed) {
+        sinkSend({ type: "error", reason: "upstream-unavailable" });
+        shutdown(1011, "upstream not ready");
+      }
+    });
+    return enc;
+  };
+
+  /** 这句收完：杀掉 ffmpeg、收掉上游、为下一句预热 */
+  const endUtterance = (): void => {
+    utteranceActive = false;
+    utteranceTimer = clearTimer(utteranceTimer);
+    killEncoder();
+    closeUpstream();
+    if (!tearingDown) openUpstream();
+  };
+
+  /** 等 final（sentence_end / task-finished 触发） */
+  const waitFinal = (): Promise<void> => {
+    if (finalSent) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      finalWaiter = resolve;
+      resultTimer = setTimeout(() => {
+        resultTimer = null;
+        const waiter = finalWaiter;
+        finalWaiter = null;
+        // 超时**不是**静默丢句：有文本先把 final 给出去，再报一条明确的 error
+        emitFinal();
+        waiter?.();
+        if (closed) return;
+        sinkSend({ type: "error", reason: "result-timeout" });
+        shutdown(1011, "result timeout");
+      }, resultTimeoutMs);
+    });
+  };
+
+  /** 收尾的正身：关 ffmpeg → finish-task → 等 final */
+  const finishOnce = async (reason: string, keep: boolean): Promise<void> => {
+    utteranceTimer = clearTimer(utteranceTimer);
+    finalizeTimer = clearTimer(finalizeTimer);
+
+    if (!keep) {
+      // 客户端已经走了：不再新建上游、不再转码（省一条连接的钱，也省一次 ffmpeg）
+      tearingDown = true;
+      killEncoder();
+      pendingPcm.length = 0;
+      shutdown(1000, reason);
+      return;
+    }
+    if (!utteranceActive) {
+      // 没有音频：什么都不用做（上游留着给下一句）
+      openUpstream();
+      return;
+    }
+
+    // 收尾预算（转码收尾 + 上游往返都在里面）：到点必须有结论
+    finalizeTimer = setTimeout(() => {
+      finalizeTimer = null;
+      if (closed) return;
+      sinkSend({ type: "error", reason: "timeout" });
+      shutdown(1011, "finalize timeout");
+    }, totalBudgetMs);
+
+    try {
+      // ① 关掉 ffmpeg 的输入，等它把最后的 PCM 吐完
+      //    （finish() 返回时 stdout 已经全部回调过 → 不会漏掉句尾）
+      const enc = encoder;
+      if (enc) {
+        const result = await enc.finish();
+        if (closed) return;
+        if (!result.ok && pcmBytes === 0) {
+          // 一块 PCM 都没拿到 = 真的转码失败 → 明确失败
+          log(`[stt:ali:stream] ffmpeg failed: ${result.detail}`);
+          sinkSend({ type: "error", reason: "audio-encode-failed" });
+          shutdown(1011, "audio encode failed");
+          return;
+        }
+        if (!result.ok) {
+          // 拿到了 PCM 但 ffmpeg 收尾报错（录到的 webm 常常缺 cues/时长）：
+          // 音频是好的，不该把整句丢掉 —— 只记日志
+          log(`[stt:ali:stream] ffmpeg exit ${result.code} (audio kept): ${result.detail}`);
+        }
+      }
+
+      // ② 确保上游 task 已就绪（音频可能比 task-started 先到）
+      const ready = await ensureTaskStarted();
+      if (!ready) {
+        if (closed) return;
+        sinkSend({ type: "error", reason: "upstream-unavailable" });
+        shutdown(1011, "upstream not ready");
+        return;
+      }
+
+      // ③ 告诉上游「音频发完了」
+      const task = upstream;
+      if (task) {
+        try {
+          task.socket.send(aliFinishTaskMessage(task.taskId));
+        } catch {
+          sinkSend({ type: "error", reason: "upstream-error" });
+          shutdown(1011, "upstream send failed");
+          return;
+        }
+      }
+
+      // ④ 等 final
+      //    上游可能在我们发 finish-task 之前就已经把这句话收完了（用户说完的自然停顿
+      //    正好落在一句话末尾）—— 那就不用再等，直接给 final。
+      if (taskFinished || sentenceEnded) emitFinal();
+      await waitFinal();
+      if (closed) return;
+      endUtterance();
+    } finally {
+      finalizeTimer = clearTimer(finalizeTimer);
+    }
+  };
+
+  /** 串行化收尾：同一时刻只跑一次 */
+  const runFinalize = async (reason: string, keep: boolean): Promise<void> => {
+    if (closed) return;
+    if (running) {
+      queued = { reason, keep: keep || (queued?.keep ?? false) };
+      return;
+    }
+    running = true;
+    try {
+      let next: { reason: string; keep: boolean } | null = { reason, keep };
+      while (next !== null && !closed) {
+        queued = null;
+        await finishOnce(next.reason, next.keep);
+        next = queued;
+      }
+    } finally {
+      running = false;
+    }
+  };
+
+  /**
+   * 单句绝对时长兜底：到点强制收尾（给 final），不再等 `finish_utterance`。
+   * 与「帧间隔」无关（那是旧 bug）—— 只有绝对时长，调度抖动不会把句子切坏。
+   */
+  const armUtteranceTimer = (): void => {
+    if (utteranceTimer !== null) return;
+    utteranceTimer = setTimeout(() => {
+      utteranceTimer = null;
+      void runFinalize("utterance-too-long", true);
+    }, maxUtteranceMs);
+  };
+
+  // 会话级资源上限：同时存在的会话太多 → 明确失败，不静默
+  if (activeSessions >= maxSessions) {
+    log(`[stt:ali:stream] too many sessions (${activeSessions})`);
+    try {
+      options.sink.sendText(JSON.stringify({ type: "error", reason: "too-many-sessions" }));
+      options.sink.close(1013, "too many sessions");
+    } catch {
+      /* 浏览器侧可能已经关了 */
+    }
+    return {
+      pushAudio() {},
+      finishUtterance() {},
+      clientClosed() {},
+      get closed() {
+        return true;
+      },
+      get lastUpstreamType() {
+        return null;
+      },
+    };
+  }
+  activeSessions += 1;
+
+  // 能力上报：上游**不发** speech_started → 客户端走 energy VAD（绝不伪造）
+  sinkSend({ type: "capabilities", provider: "ali", supportsSpeechStarted: false });
+
+  // 预热：只把**连接**建起来（省握手时间）；task 留到音频就绪时再建
+  openUpstream();
+
+  return {
+    pushAudio(data) {
+      if (closed) return;
+      frames += 1;
+      const frame =
+        data instanceof ArrayBuffer
+          ? new Uint8Array(data)
+          : typeof data === "string"
+            ? new TextEncoder().encode(data)
+            : data;
+      const copy = frame.slice();
+      bytes += copy.byteLength;
+
+      // 新的一句（第一块音频到达）
+      const enc = utteranceActive ? (encoder as StreamingAudioEncoder) : beginUtterance();
+
+      // 资源上限（会话级，按句计）
+      if (rawBytes + copy.byteLength > ALI_MAX_AUDIO_BYTES) {
+        sinkSend({ type: "error", reason: "audio-too-large" });
+        shutdown(1009, "audio too large");
+        return;
+      }
+      frameCount += 1;
+      if (frameCount > maxFrames) {
+        sinkSend({ type: "error", reason: "too-many-frames" });
+        shutdown(1009, "too many frames");
+        return;
+      }
+      rawBytes += copy.byteLength;
+
+      // 顺序写进 ffmpeg（写链顺带做了背压：上一块没写完，下一块等着）
+      writeChain = writeChain
+        .then(() => enc.write(copy))
+        .catch((error: unknown) => {
+          log(
+            `[stt:ali:stream] ffmpeg write failed: ${error instanceof Error ? error.message : "unknown"}`,
+          );
+          sinkSend({ type: "error", reason: "audio-encode-failed" });
+          shutdown(1011, "audio encode failed");
+        });
+
+      // 句子边界只由显式 finish_utterance 决定；这里只挂绝对时长兜底
+      armUtteranceTimer();
+    },
+
+    finishUtterance() {
+      finishRequested = true;
+      void runFinalize("utterance-end", true);
+    },
+
+    clientClosed() {
+      // 客户端已经走了：立刻进入收尾态 —— **不再新建上游连接**
+      tearingDown = true;
+      void runFinalize("client-closed", false);
+    },
+
+    get closed() {
+      return closed;
+    },
+
+    get lastUpstreamType() {
+      return lastEvent;
+    },
+  };
+}
+
+/**
+ * 按模型名分发：流式（默认）还是整段（回退）。
+ *
+ * 用 `ALI_ASR_MODEL=fun-asr-flash-2026-06-15` 就能切回整段路径 ——
+ * 那条路径**没有删**，只是不再是默认。
+ */
+export function createAliSttBridgeForModel(options: AliSttOptions): SttBridge {
+  const model = options.model ?? ALI_ASR_MODEL;
+  if (isStreamingAsrModel(model)) {
+    return createAliStreamingSttBridge({ ...options, model });
+  }
+  return createAliSttBridge({ ...options, model });
 }

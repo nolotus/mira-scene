@@ -97,7 +97,11 @@ export interface DashscopeConfig {
   apiKey: string;
   /** 上游 WS 地址（可用 ALI_ASR_WS_URL 覆盖，主要给本地 mock / 自建网关用） */
   wsUrl: string;
-  /** 模型名（可用 ALI_ASR_MODEL 覆盖） */
+  /**
+   * 模型名（可用 `ALI_ASR_MODEL` 覆盖）。
+   * 默认 = **真流式** `qwen-audio-3.0-asr-flash-streaming`（边说边出字）；
+   * 设成 `fun-asr-flash-2026-06-15` 就切回**整段识别**（攒完整段才出一条文本）。
+   */
   model: string;
 }
 
