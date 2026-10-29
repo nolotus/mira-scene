@@ -71,7 +71,7 @@ const camera = (value: "push_in" | "pull_back" | "whip_pan" | "shake" | "settle"
   md({ kind: "camera", move: value });
 const vfx = (value: "lightning" | "rain_heavy" | "rain_light" | "warm_glow" | "lights_dim" | "steam_wisp"): MockStep =>
   md({ kind: "vfx", vfx: value });
-const scene = (value: "cafe_night" | "cafe_closing" | "window_rain"): MockStep =>
+const scene = (value: "cafe_night" | "cafe_closing" | "window_rain" | "seaside_dawn"): MockStep =>
   md({ kind: "scene", scene: value });
 
 /**
@@ -149,6 +149,25 @@ export const MOCK_BEATS: readonly MockBeat[] = [
       say("坐吧。"),
     ],
     cues: [{ atChar: 0, directive: { kind: "scene", scene: "cafe_night" } }],
+  },
+  {
+    // 海边：破晓的海岸线（seaside_dawn）。 seaside 场景**没有杯子也没有窗**，
+    // 所以这里只能用 stand / look_back，绝不能出现 hold_cup / glance_window。
+    id: "scene_seaside",
+    match: /海边|去看海|看海|海面|大海|海浪|海鸥|去海边/,
+    priority: 83,
+    once: true,
+    steps: [
+      say("……真的要看海吗。"),
+      say("天还没亮透。"),
+      say("海是灰的，风很凉。"),
+    ],
+    cues: [
+      { atChar: 0, directive: { kind: "scene", scene: "seaside_dawn" } },
+      { atChar: 0, directive: { kind: "emotion", emotion: "curious" } },
+      { atChar: 6, directive: { kind: "camera", move: "push_in" } },
+      { atChar: 15, directive: { kind: "action", action: "look_back" } },
+    ],
   },
 
   // —— 用户替她担心：最容易被戳到的点 ——

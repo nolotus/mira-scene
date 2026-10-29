@@ -1855,3 +1855,251 @@
   .stage-root .lightning span { opacity: 0.55; }
   .stage-root .sub { animation: none !important; }
 }
+
+/* ============================================================================
+   海边场景 seaside_dawn：天幕 / 海面 / 岸线
+   ---------------------------------------------------------------------------
+   三层的构图契约（都写成百分比，不写死像素）：
+     天幕 0%–30%（--sea-horizon，海天分界）
+     海面 30%–(100% − 地平线)（--horizon-y，来自 spec.camera.horizonY）
+     岸线 底部 --horizon-y 那一段（沙滩 = 角色脚下的地平线）
+   全部是渐变 + 内联 SVG 几何，没有位图。
+   ========================================================================== */
+
+.sc-sky,
+.sc-sea,
+.sc-shore {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* --- 天幕：夜色未退 + 地平线上的暖光 --------------------------------------- */
+
+.dawn-sky {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(58% 34% at 74% 25%, rgba(255, 214, 170, 0.5), transparent 64%),
+    linear-gradient(
+      180deg,
+      #101f33 0%,
+      #1d3752 12%,
+      #3f6180 21%,
+      #7d95a0 26.5%,
+      #c9a68f 29%,
+      #e8bd93 30.4%,
+      #6f7f88 31.4%,
+      #2c4756 100%
+    );
+}
+
+.dawn-sun-glow {
+  position: absolute;
+  left: 73%;
+  top: 26.5%;
+  width: 36%;
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(255, 231, 194, 0.9) 0%,
+    rgba(255, 198, 142, 0.34) 34%,
+    rgba(255, 184, 132, 0.08) 58%,
+    transparent 72%
+  );
+  mix-blend-mode: screen;
+  filter: blur(5px);
+  animation: sunPulse 7.5s ease-in-out infinite;
+}
+
+.dawn-sun {
+  position: absolute;
+  left: 74.5%;
+  top: 27.6%;
+  width: 4.4%;
+  aspect-ratio: 1;
+  translate: -50% -50%;
+  border-radius: 50%;
+  background: radial-gradient(circle, #fff6e6 0%, #ffd9a8 52%, rgba(255, 201, 148, 0) 74%);
+  box-shadow: 0 0 30px 10px rgba(255, 206, 150, 0.3);
+}
+
+.dawn-cloud {
+  position: absolute;
+  height: 1.8%;
+  border-radius: 50%;
+  background: linear-gradient(90deg, transparent, rgba(255, 216, 182, 0.4), transparent);
+  filter: blur(3px);
+}
+
+.dawn-cloud.c1 { left: 2%; top: 13%; width: 48%; }
+.dawn-cloud.c2 { left: 40%; top: 20%; width: 34%; opacity: 0.66; }
+.dawn-cloud.c3 { left: 10%; top: 25%; width: 26%; opacity: 0.46; }
+
+/* --- 海面：远水接暖光、近水转深、波线与反光 ------------------------------- */
+
+.sc-sea {
+  --sea-horizon: 30%;
+}
+
+.sea-water {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: var(--sea-horizon);
+  bottom: 0;
+  background: linear-gradient(
+    180deg,
+    #e3b692 0%,
+    #9aa89f 2.5%,
+    #557684 10%,
+    #35596a 30%,
+    #244250 56%,
+    #172c37 100%
+  );
+}
+
+.sea-glitter {
+  position: absolute;
+  left: 61%;
+  top: var(--sea-horizon);
+  bottom: 0;
+  width: 26%;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(255, 226, 182, 0.5) 0 2px,
+    transparent 2px 7px
+  );
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.9), transparent 52%);
+  mix-blend-mode: screen;
+  animation: glitterShift 5.5s ease-in-out infinite;
+}
+
+.sea-waves {
+  position: absolute;
+  inset: 0;
+  color: #e6f2f5;
+}
+
+.sea-wave {
+  position: absolute;
+}
+
+.sea-gulls {
+  position: absolute;
+  inset: 0;
+  color: rgba(26, 38, 48, 0.72);
+}
+
+.sea-gull-lane {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+}
+
+.sea-gull {
+  position: absolute;
+  left: -8%;
+  top: 0;
+  animation-name: gullDrift;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+/* --- 岸线：湿沙、干沙、浪花、礁石、风 -------------------------------------- */
+
+.shore-sand {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--horizon-y, 30%);
+  background: linear-gradient(180deg, #6f6a5b 0%, #615a4c 22%, #4e463b 62%, #332e26 100%);
+}
+
+.shore-wet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: calc(var(--horizon-y, 30%) * 0.46);
+  background: linear-gradient(180deg, rgba(24, 40, 50, 0.72), rgba(24, 40, 50, 0));
+}
+
+.shore-foam {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--horizon-y, 30%) - 0.7%);
+  height: 1.8%;
+  background: linear-gradient(180deg, rgba(238, 247, 250, 0.5), rgba(238, 247, 250, 0));
+  filter: blur(1.2px);
+}
+
+.shore-rocks {
+  position: absolute;
+  inset: 0;
+  color: #1f2429;
+}
+
+.shore-rock {
+  position: absolute;
+}
+
+.shore-wind span {
+  position: absolute;
+  height: 1px;
+  border-radius: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.85), transparent);
+  animation-name: windDrift;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+/* --- 前景海雾（seaside_dawn 的 fg 层：sea_spray） --------------------------- */
+
+.sea-spray {
+  position: absolute;
+  inset: 0;
+}
+
+.sea-spray i {
+  position: absolute;
+  bottom: 8%;
+  border-radius: 50%;
+  background: rgba(236, 246, 250, 0.7);
+  animation-name: sprayRise;
+  animation-timing-function: ease-out;
+  animation-iteration-count: infinite;
+}
+
+@keyframes sunPulse {
+  0%, 100% { opacity: 0.82; translate: -50% -50%; scale: 1; }
+  50% { opacity: 1; translate: -50% -50%; scale: 1.07; }
+}
+
+@keyframes glitterShift {
+  0%, 100% { opacity: 0.7; translate: -2% 0; }
+  50% { opacity: 1; translate: 2% 0; }
+}
+
+@keyframes gullDrift {
+  0% { left: -8%; }
+  100% { left: 108%; }
+}
+
+@keyframes windDrift {
+  0% { left: -26%; opacity: 0; }
+  18% { opacity: 1; }
+  82% { opacity: 1; }
+  100% { left: 112%; opacity: 0; }
+}
+
+@keyframes sprayRise {
+  0% { transform: translateY(0) scale(0.6); opacity: 0; }
+  18% { opacity: 0.85; }
+  100% { transform: translateY(-46vh) scale(1.5); opacity: 0; }
+}

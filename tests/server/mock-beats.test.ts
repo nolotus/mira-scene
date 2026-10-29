@@ -32,10 +32,11 @@ describe("Mock 导演的 beat 选择", () => {
 
   test("用户点地点 → 命中对应场景 beat（场景由对话内容驱动，不是定时轮播）", () => {
     const fired = new Set(["opening"]);
-    // 海边没有渲染器 → 不该命中任何场景 beat（不能只断言某个已不存在的 id）
     const sceneBeatIds = MOCK_BEATS.filter((beat) => beat.id.startsWith("scene_")).map((beat) => beat.id);
     expect(sceneBeatIds.length).toBeGreaterThan(0);
-    expect(sceneBeatIds).not.toContain(selectMockBeat("我们去看海吧", 2, fired).id);
+    // 海边现在有渲染器了 → 说去看海要真的命中场景 beat
+    expect(selectMockBeat("我们去看海吧", 2, fired).id).toBe("scene_seaside");
+    expect(sceneBeatIds).toContain(selectMockBeat("我们去看海吧", 2, fired).id);
     expect(selectMockBeat("是不是该打烊了", 2, fired).id).toBe("scene_closing");
     expect(selectMockBeat("我看看窗外", 2, fired).id).toBe("scene_window");
     expect(selectMockBeat("还是回店里坐吧", 2, fired).id).toBe("scene_back_inside");
@@ -49,7 +50,7 @@ describe("Mock 导演的 beat 选择", () => {
     const fired = new Set(["opening"]);
     for (const text of ["你今天怎么样", "嗯……", "那你呢"]) {
       const id = selectMockBeat(text, 3, fired).id;
-      expect(["scene_closing", "scene_window", "scene_back_inside"]).not.toContain(id);
+      expect(["scene_closing", "scene_window", "scene_back_inside", "scene_seaside"]).not.toContain(id);
     }
   });
 });
@@ -63,9 +64,8 @@ describe("Mock 的场景指令必须过服务端白名单", () => {
       ...beat.steps.filter((step) => step.kind === "directive").map((step) => step.directive),
     ]).filter((d) => d.kind === "scene");
     expect(scenes.length).toBeGreaterThan(0);
-    // 海边没有渲染器（场景数据存在但 UI 不暴露），必须被白名单拒绝：
-    // 否则 mock/模型会以为切了场景，画面却还是原来那间咖啡店
-    expect(validateDirective({ kind: "scene", scene: "seaside_dawn" as never })).toBeNull();
+    // 海边有渲染器了，白名单必须收它（否则切过去会被服务端丢成空场）
+    expect(validateDirective({ kind: "scene", scene: "seaside_dawn" as never })).not.toBeNull();
     for (const directive of scenes) {
       expect(validateDirective(directive)).not.toBeNull();
     }

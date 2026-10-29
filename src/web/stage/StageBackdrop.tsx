@@ -79,6 +79,136 @@ function particleCount(spec: SceneSpec, kind: "glass_drops" | "steam"): number {
   return spec.particles?.find((p) => p.kind === kind)?.count ?? 0;
 }
 
+// ---------------------------------------------------------------- 海边场景
+
+/**
+ * 「这个构件在这个场景里存在吗」—— 渲染器按 spec 声明的 props 决定画不画，
+ * 而不是按场景 id 写分支（那样每加一个地点就得改一遍渲染器）。
+ */
+export function hasProp(spec: SceneSpec, prop: string): boolean {
+  return spec.depthPlanes.some((plane) => plane.props.includes(prop));
+}
+
+/**
+ * 海面的几何（固定值 = 同一片海每次都一样，截图可复现）。
+ * top 是距画面顶部的百分比，width 是波线的长度占比 —— 越靠下越宽越近（透视）。
+ */
+const SEA_WAVES = [
+  { top: 33.5, width: 26, left: 6, opacity: 0.22, height: 1 },
+  { top: 36, width: 34, left: 42, opacity: 0.26, height: 1.1 },
+  { top: 39.5, width: 30, left: 14, opacity: 0.3, height: 1.2 },
+  { top: 44, width: 44, left: 40, opacity: 0.32, height: 1.4 },
+  { top: 49, width: 38, left: 8, opacity: 0.34, height: 1.6 },
+  { top: 55, width: 52, left: 34, opacity: 0.3, height: 1.8 },
+  { top: 62, width: 46, left: 4, opacity: 0.26, height: 2 },
+  { top: 70, width: 62, left: 28, opacity: 0.2, height: 2.4 },
+] as const;
+
+/** 海鸥：三只，位置固定，靠 CSS 动画横移（不是随机） */
+const GULLS = [
+  { top: 12, left: 18, scale: 1, delay: 0, duration: 46 },
+  { top: 16, left: 46, scale: 0.72, delay: -12, duration: 58 },
+  { top: 9, left: 63, scale: 0.58, delay: -25, duration: 67 },
+] as const;
+
+/** 礁石：暗色剪影，压在岸线附近 */
+const ROCKS = [
+  { left: 4, width: 16, height: 9, bottom: 16 },
+  { left: 26, width: 9, height: 5, bottom: 13 },
+  { left: 74, width: 20, height: 12, bottom: 18 },
+  { left: 93, width: 12, height: 7, bottom: 11 },
+] as const;
+
+/** 风力细节：几道掠过画面的细长气流 */
+const WIND_LINES = [
+  { top: 30, left: 2, width: 34, opacity: 0.16, duration: 17, delay: -3 },
+  { top: 36, left: 46, width: 28, opacity: 0.12, duration: 22, delay: -9 },
+  { top: 43, left: 18, width: 22, opacity: 0.1, duration: 26, delay: -15 },
+] as const;
+
+/** 海雾：前景飘起来的细小水珠 */
+const SPRAY_DOTS = [
+  { left: 12, size: 2.4, delay: 0, duration: 7.5 },
+  { left: 26, size: 1.8, delay: -2.4, duration: 9 },
+  { left: 41, size: 2.1, delay: -4.1, duration: 8.2 },
+  { left: 58, size: 1.6, delay: -1.2, duration: 10 },
+  { left: 73, size: 2.6, delay: -5.3, duration: 7.9 },
+  { left: 88, size: 1.9, delay: -3.1, duration: 8.8 },
+] as const;
+
+/** 一段波线：一条起伏的正弦路径（SVG 视口被拉宽成一条细带） */
+function WaveLine({ wave }: { wave: (typeof SEA_WAVES)[number] }) {
+  return (
+    <svg
+      className="sea-wave"
+      viewBox="0 0 100 4"
+      preserveAspectRatio="none"
+      style={{
+        top: `${wave.top}%`,
+        left: `${wave.left}%`,
+        width: `${wave.width}%`,
+        height: `${wave.height * 1.6}px`,
+        opacity: wave.opacity,
+      }}
+      aria-hidden="true"
+    >
+      <path
+        d="M0,2 q6,-1.7 12,0 t12,0 t12,0 t12,0 t12,0 t12,0 t12,0 t12,0 t12,0"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/** 一只海鸥：两段弧拼出来的剪影（外面套一条全宽的泳道，方便横向漂过画面） */
+function Gull({ gull }: { gull: (typeof GULLS)[number] }) {
+  return (
+    <span className="sea-gull-lane" style={{ top: `${gull.top}%` }} aria-hidden="true">
+      <svg
+        className="sea-gull"
+        viewBox="0 0 16 8"
+        style={{
+          width: `${14 * gull.scale}px`,
+          animationDelay: `${gull.delay}s`,
+          animationDuration: `${gull.duration}s`,
+        }}
+      >
+        <path
+          d="M0,5 q4,-4.6 8,0 q4,4.6 8,0"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.4"
+          strokeLinecap="round"
+        />
+      </svg>
+    </span>
+  );
+}
+
+/** 一块礁石：不规则多边形剪影 */
+function Rock({ rock }: { rock: (typeof ROCKS)[number] }) {
+  return (
+    <svg
+      className="shore-rock"
+      viewBox="0 0 100 60"
+      preserveAspectRatio="none"
+      style={{
+        left: `${rock.left}%`,
+        bottom: `${rock.bottom}%`,
+        width: `${rock.width}%`,
+        height: `${rock.height}%`,
+      }}
+      aria-hidden="true"
+    >
+      <path d="M2,60 L14,20 L34,4 L58,14 L78,34 L98,60 Z" fill="currentColor" />
+      <path d="M14,20 L34,4 L44,26 L24,40 Z" fill="rgba(255,255,255,0.10)" />
+    </svg>
+  );
+}
+
 function RainSheet({ streaks }: { streaks: Streak[] }) {
   const block = (suffix: string) => (
     <div className={`rain-block ${suffix}`}>
@@ -217,12 +347,89 @@ export const PLANE_RENDERERS: Partial<Record<PlaneId, (spec: SceneSpec) => React
     </>
   ),
 
+  // ---- 破晓天幕：渐变 + 日晕 + 薄云（最远） ----
+  sky: () => (
+    <>
+      <div className="dawn-sky" />
+      <div className="dawn-sun-glow" />
+      <div className="dawn-sun" />
+      <div className="dawn-cloud c1" />
+      <div className="dawn-cloud c2" />
+      <div className="dawn-cloud c3" />
+    </>
+  ),
+
+  // ---- 海面：波线 + 反光 + 海鸥（中景） ----
+  sea: () => (
+    <>
+      <div className="sea-water" />
+      <div className="sea-glitter" />
+      <div className="sea-waves">
+        {SEA_WAVES.map((wave, i) => (
+          <WaveLine key={i} wave={wave} />
+        ))}
+      </div>
+      <div className="sea-gulls">
+        {GULLS.map((gull, i) => (
+          <Gull key={i} gull={gull} />
+        ))}
+      </div>
+    </>
+  ),
+
+  // ---- 岸线：沙滩 + 礁石 + 风力细节（近景） ----
+  shore: (spec) => (
+    <>
+      <div className="shore-sand" />
+      <div className="shore-wet" />
+      <div className="shore-foam" />
+      <div className="shore-rocks">
+        {ROCKS.map((rock, i) => (
+          <Rock key={i} rock={rock} />
+        ))}
+      </div>
+      {hasProp(spec, "wind") && (
+        <div className="shore-wind" aria-hidden="true">
+          {WIND_LINES.map((line, i) => (
+            <span
+              key={i}
+              style={{
+                top: `${line.top}%`,
+                left: `${line.left}%`,
+                width: `${line.width}%`,
+                opacity: line.opacity,
+                animationDelay: `${line.delay}s`,
+                animationDuration: `${line.duration}s`,
+              }}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  ),
+
   // ---- 前景雨幕 / 水汽 / 暗角 / 闪电 ----
   fg: (spec) => (
     <>
       <div className="rain-layer rain-near" aria-hidden="true">
         <RainSheet streaks={streaksFor(spec, "rain_near")} />
       </div>
+      {hasProp(spec, "sea_spray") && (
+        <div className="sea-spray" aria-hidden="true">
+          {SPRAY_DOTS.map((dot, i) => (
+            <i
+              key={i}
+              style={{
+                left: `${dot.left}%`,
+                width: `${dot.size}px`,
+                height: `${dot.size}px`,
+                animationDelay: `${dot.delay}s`,
+                animationDuration: `${dot.duration}s`,
+              }}
+            />
+          ))}
+        </div>
+      )}
       <div className="haze" />
       <div className="vignette" />
       <div className="lightning">

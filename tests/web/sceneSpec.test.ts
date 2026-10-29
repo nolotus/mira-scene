@@ -76,12 +76,45 @@ describe("SceneSpec 完整性", () => {
     }
   });
 
-  test("示例场景 seaside_dawn 数据完整，但明确没有渲染器（UI 不暴露）", () => {
+  test("海边场景 seaside_dawn 数据完整，且每一层都有渲染器（能真的切过去）", () => {
     const spec = specOf("seaside_dawn");
     expect(spec.id).toBe("seaside_dawn");
     expect(spec.actions.length).toBeGreaterThan(0);
     expect(spec.particles).toBeUndefined();
-    expect(unsupportedPlanes(spec)).toContain("sea");
+    // 不再有缺口层：天幕 / 海面 / 岸线 / 前景四层都有渲染器
+    expect(unsupportedPlanes(spec)).toEqual([]);
+    expect(spec.depthPlanes.map((p) => p.id)).toEqual(["sky", "sea", "shore", "fg"]);
+    for (const plane of spec.depthPlanes) {
+      expect(RENDERABLE_PLANES).toContain(plane.id);
+    }
+  });
+
+  test("海边三层的渲染器真的把声明的构件画了出来", async () => {
+    const { PLANE_RENDERERS } = await import("../../src/web/stage/StageBackdrop");
+    for (const plane of ["sky", "sea", "shore"] as const) {
+      expect(PLANE_RENDERERS[plane]).toBeDefined();
+    }
+    // 渲染出来的 DOM 里要真的有构件，而不是一层空白
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { StageBackdrop } = await import("../../src/web/stage/StageBackdrop");
+    const html = renderToStaticMarkup(createElement(StageBackdrop, { scene: "seaside_dawn" }));
+    for (const marker of [
+      "dawn-sky", // 天空渐变
+      "dawn-sun-glow", // 日晕
+      "sea-water", // 海面
+      "sea-wave", // 波线
+      "sea-gull", // 海鸥
+      "shore-sand", // 沙滩
+      "shore-rock", // 礁石
+      "shore-wind", // 风力细节
+      "sea-spray", // 前景水雾
+      "vignette", // 暗角
+    ]) {
+      expect(html).toContain(marker);
+    }
+    // 海边没有雨：不能画出雨丝
+    expect(html).not.toContain("streak");
   });
 });
 

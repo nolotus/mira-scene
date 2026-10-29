@@ -23,9 +23,8 @@ import type { Action, Pose, SceneVariant } from "../../../shared/protocol";
 
 /**
  * 景深层 id。前四个是当前咖啡馆用到的层，各自在 StageBackdrop 里有一个渲染器；
- * `sky / sea / shore` 是给「数据先行」的场景（例如示例 seaside_dawn）占位用的，
- * 它们目前没有渲染器 —— `unsupportedPlanes()` 会把这种缺口显式报出来，
- * 而不是静默渲染成一块空白。
+ * `sky / sea / shore` 是「海边的天幕 / 海面 / 岸线」三层，
+ * 由 seaside_dawn 使用，各自有渲染器（见 StageBackdrop 的 PLANE_RENDERERS）。
  */
 export type PlaneId = "room" | "window" | "warm" | "fg" | "sky" | "sea" | "shore";
 
@@ -421,9 +420,17 @@ export function missingProps(spec: SceneSpec, action: SceneAction): string[] {
 }
 
 /** 有渲染器的层。渲染层画的层必须都在这里，否则会渲染成一块空背景 */
-export const RENDERABLE_PLANES: readonly PlaneId[] = ["room", "window", "warm", "fg"];
+export const RENDERABLE_PLANES: readonly PlaneId[] = [
+  "room",
+  "window",
+  "warm",
+  "fg",
+  "sky",
+  "sea",
+  "shore",
+];
 
-/** 这份 spec 里没有渲染器的层（示例场景会命中，生产场景目前不该命中） */
+/** 这份 spec 里没有渲染器的层（现在生产场景与 seaside_dawn 都不该命中） */
 export function unsupportedPlanes(spec: SceneSpec): PlaneId[] {
   return spec.depthPlanes.map((p) => p.id).filter((id) => !RENDERABLE_PLANES.includes(id));
 }
@@ -446,5 +453,7 @@ export function sceneVars(spec: SceneSpec): Record<string, string> {
     "--rim-strength": `${spec.lighting.rimStrength}`,
     "--char-bottom": box.bottom,
     "--char-height": box.height,
+    // 地平线（角色脚下那条线）在画面底部的比例 —— 岸线层用它决定沙滩有多高
+    "--horizon-y": `${pct(spec.camera.horizonY)}%`,
   };
 }

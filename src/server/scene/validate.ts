@@ -50,7 +50,12 @@ export const VFX = [
   "steam_wisp",
 ] as const satisfies readonly Vfx[];
 
-export const SCENES = ["cafe_night", "cafe_closing", "window_rain"] as const satisfies readonly SceneVariant[];
+export const SCENES = [
+  "cafe_night",
+  "cafe_closing",
+  "window_rain",
+  "seaside_dawn",
+] as const satisfies readonly SceneVariant[];
 
 /** 指令词汇表（也用于给真模型拼 system prompt） */
 export const DIRECTIVE_VOCAB: Record<string, readonly string[]> = {

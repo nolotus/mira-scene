@@ -26,7 +26,7 @@ import { Stage } from "./Stage";
 const EMOTIONS: Emotion[] = ["neutral", "curious", "warm", "amused", "anxious", "sad", "surprised"];
 const STATUSES: CharacterStatus[] = ["idle", "listening", "thinking", "speaking"];
 const POSES: Pose[] = ["stand", "lean_in", "turn_away", "hold_cup", "glance_window"];
-const SCENES: SceneVariant[] = ["cafe_night", "cafe_closing", "window_rain"];
+const SCENES: SceneVariant[] = ["cafe_night", "cafe_closing", "window_rain", "seaside_dawn"];
 const CAMERAS: CameraMove[] = ["push_in", "pull_back", "whip_pan", "shake", "settle"];
 const VFX: Vfx[] = ["lightning", "rain_heavy", "rain_light", "warm_glow", "lights_dim", "steam_wisp"];
 const ACTIONS: Action[] = ["blink", "hair_tuck", "sigh", "shiver", "look_back", "nod", "startle"];
