@@ -1,3 +1,4 @@
+import { createFillerPlayer } from "./voice/filler";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Stage } from "./stage/Stage";
 import { reportSessionSignal } from "./stage/clip/clipBus";
@@ -167,7 +168,14 @@ export function App() {
     [nativeTts, demo],
   );
   const store = useMemo(
-    () => new SessionStore({ api, tts, audioMode: boot.audio }),
+    () =>
+      new SessionStore({
+        api,
+        tts,
+        audioMode: boot.audio,
+        // 垫音：发送瞬间先「嗯」一声，真实语音一到就让位（见 voice/filler.ts）
+        filler: createFillerPlayer(),
+      }),
     [api, tts, boot.audio],
   );
 
