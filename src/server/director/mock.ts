@@ -78,7 +78,7 @@ const scene = (value: "cafe_night" | "cafe_closing" | "window_rain"): MockStep =
  * 主要 beat 表。priority 决定「这句话同时命中多条时听谁的」。
  * 剧情弧线：寒暄 → 雨夜氛围 → 试探「等谁」→ 回避与松动 → 打烊/灯暗 → 摊牌或道别。
  */
-const BEATS: readonly MockBeat[] = [
+export const MOCK_BEATS: readonly MockBeat[] = [
   // —— 由对话内容触发的显著视觉事件：提到雨 ——
   {
     id: "rain_lightning",
@@ -101,6 +101,56 @@ const BEATS: readonly MockBeat[] = [
       { atChar: 31, directive: { kind: "pose", pose: "glance_window" } },
     ],
   },
+  // —— 场景切换：由「用户明确提到地点/时间」触发（2026-10-29 加）——
+  // 设计口径：只在用户点了地名或点了时间才切，且每条 once ——画面不该自己乱逛。
+  {
+    id: "scene_closing",
+    // 「几点 / 太晚 / 关门 / 闭店 / 下班 / 营业」原本在独立的 closing_keyword(76) beat 里；
+    // 那条被本条(84)完全遮蔽，已合并过来，否则既死分支又丢能力（审查 2026-10-29）
+    match: /打烊|要关门|关门|收摊|快关门|几点|太晚|闭店|下班|营业/,
+    priority: 84,
+    once: true,
+    steps: [
+      say("灯确实该关了。"),
+      say("老板十分钟前就把牌子翻过去了。"),
+      say("他说可以让我坐到雨停。"),
+      say("这里的人都很好。"),
+      say("好到我不敢问太多。"),
+      say("再给我一分钟。"),
+    ],
+    cues: [
+      { atChar: 0, directive: { kind: "scene", scene: "cafe_closing" } },
+      { atChar: 0, directive: { kind: "vfx", vfx: "lights_dim" } },
+      { atChar: 0, directive: { kind: "emotion", emotion: "sad" } },
+    ],
+  },
+  {
+    id: "scene_window",
+    match: /看看窗外|望向窗外|窗外|玻璃上|街对面/,
+    priority: 82,
+    once: true,
+    steps: [
+      say("嗯。"),
+      say("玻璃上全是水。"),
+      say("外面什么都看不清。"),
+    ],
+    cues: [
+      { atChar: 0, directive: { kind: "scene", scene: "window_rain" } },
+      { atChar: 0, directive: { kind: "pose", pose: "glance_window" } },
+    ],
+  },
+  {
+    id: "scene_back_inside",
+    match: /回店里|回咖啡馆|回屋里|还是店里|进来坐/,
+    priority: 80,
+    once: true,
+    steps: [
+      say("还是店里暖和。"),
+      say("坐吧。"),
+    ],
+    cues: [{ atChar: 0, directive: { kind: "scene", scene: "cafe_night" } }],
+  },
+
   // —— 用户替她担心：最容易被戳到的点 ——
   {
     id: "danger",
@@ -178,21 +228,6 @@ const BEATS: readonly MockBeat[] = [
     ],
   },
   // —— 场景/灯光变化：提到打烊 ——
-  {
-    id: "closing_keyword",
-    match: /打烊|关门|几点|太晚|闭店|下班|营业/,
-    priority: 76,
-    once: true,
-    steps: [
-      scene("cafe_closing"),
-      vfx("lights_dim"),
-      say("老板十分钟前就把牌子翻过去了。"),
-      emotion("sad"),
-      say("他说可以让我坐到雨停。"),
-      say("这里的人都很好。"),
-      say("好到我不敢问太多。"),
-    ],
-  },
   // —— 用户要离开 ——
   {
     id: "leaving",
@@ -389,7 +424,7 @@ export function selectMockBeat(userText: string, phase: number, fired: ReadonlyS
   if (!userText.trim()) return SILENCE;
 
   let best: MockBeat | null = null;
-  for (const beat of BEATS) {
+  for (const beat of MOCK_BEATS) {
     if (beat.once && fired.has(beat.id)) continue;
     if ((beat.minPhase ?? 0) > phase) continue;
     if (beat.maxPhase !== undefined && phase > beat.maxPhase) continue;

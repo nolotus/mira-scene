@@ -515,6 +515,12 @@ export function createApp(options: AppOptions = {}): App {
           const timings: Record<string, number> = {};
           let said = "";
           let interrupted = false;
+          /**
+           * 一轮最多放行一条 scene：提示词里虽然写了「一轮最多一条」，但那是软约束，
+           * 模型偶尔会吐两条 → 画面在同一轮里连跳两次（审查 2026-10-29 指出）。
+           * 白名单校验之后再做这一道硬去重，代价只有一行状态。
+           */
+          let sceneSent = false;
 
           push({ type: "turn.start", turnId, epoch, at: Date.now() });
 
@@ -529,6 +535,11 @@ export function createApp(options: AppOptions = {}): App {
                 // 最后一道白名单：即使导演漏校验，脏指令也不会到渲染层
                 const directive = validateDirective(event.directive);
                 if (!directive) continue;
+                if (directive.kind === "scene") {
+                  // 一轮一条 + 不要切成当前场景（后者模型偶尔会做，画面会白闪一次）
+                  if (sceneSent || directive.scene === input.scene.scene) continue;
+                  sceneSent = true;
+                }
                 timings.firstDirective ??= elapsed();
                 push({ ...event, directive });
                 continue;
