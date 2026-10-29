@@ -1662,8 +1662,10 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
     finalGraceTimer = clearTimer(finalGraceTimer);
     const elapsed = taskFinishedAtMs > 0 ? Date.now() - taskFinishedAtMs : 0;
     if (taskFinishedAtMs > 0 && elapsed >= finalGraceMaxMs) {
+      // 只发稿，**不判空**：判空是静默窗的职责。在这里顺手判空会把 1500ms 的
+      // 静默窗实际截短成 1200ms，落在那 300ms 缝隙里的尾巴就被静默丢掉了
+      // （与「静默窗 ≥ 宽限上限 ⇒ 晚到的文本仍能救回」的设计自相矛盾）。
       emitFinal("grace_max");
-      finishEmptyUtterance();
       return;
     }
     const budget = taskFinishedAtMs > 0 ? finalGraceMaxMs - elapsed : finalGraceMs;
@@ -1673,7 +1675,6 @@ export function createAliStreamingSttBridge(options: AliSttOptions): SttBridge {
       // 到点复查：裁剪后正常不会命中，留着是为了「预算被别处拖长」时也不会绕过上限
       if (taskFinishedAtMs > 0 && Date.now() - taskFinishedAtMs >= finalGraceMaxMs) {
         emitFinal("grace_max");
-        finishEmptyUtterance();
         return;
       }
       emitFinal("grace");

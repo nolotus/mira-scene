@@ -687,11 +687,11 @@ describe("⑧ final 送达后不得残留结果超时定时器", () => {
 
 // 空结果判定是「静默窗口」：task-finished 之后连续 emptySettleQuietMs 没有任何 result，
 // 才算这句真的是空的；任何一条 result 都重置窗口（上游尾部 result 实测会晚到）。
-// 单测注入小值（生产 3000ms），免得每条用例真等三秒。
+// 单测注入小值（生产 1500ms），免得每条用例真等一秒半。
 const QUIET_MS = 150;
 /** 晚到用例用的静默窗：必须大于注入的「晚到 400ms」 */
 const LATE_QUIET_MS = 800;
-/** 宽限上限（注入，生产 3000ms） */
+/** 宽限上限（注入，生产 1200ms） */
 const GRACE_MAX_MS = 600;
 
 describe("⑧ 空结果：上游已收尾但没有文本", () => {
@@ -989,7 +989,7 @@ describe("⑧ 两个窗口的取值约束（不变量，不靠人记）", () => 
 });
 
 describe("⑧ 终稿的尾巴（task-finished 后晚到的累计文本）", () => {
-  test("宽限内的尾巴必须并进终稿（用生产默认宽限 500ms）", async () => {
+  test("宽限内的尾巴必须并进终稿（用生产默认宽限 800ms）", async () => {
     // 复审的 W1：真正决定发稿时刻的是发稿宽限，不是静默窗。
     // 宽限原先 150ms < 实测尾延迟 400ms，于是终稿只有前半句、尾巴彻底消失。
     // 这条跑的是**生产默认**宽限（ALI_FINAL_GRACE_MS，现为 800ms）。
@@ -1170,6 +1170,59 @@ describe("⑧ 终稿延迟有界（按剩余预算裁剪，不是宽限 + 上限
     const offset = Date.now() - finishedAt;
     // 上限 300 + 250ms 抖动余量；不裁剪的写法会得到 ~640ms（会红）
     expect(offset).toBeLessThan(550);
+    expect(messages.filter((m) => m.type === "final").length).toBe(1);
+  });
+});
+
+describe("⑧ 宽限上限到点时不许顺手判空（否则静默窗被截短）", () => {
+  test("装弹时已超上限、且此刻无文本 → 不许判空；随后到达的文本仍要出终稿", async () => {
+    // 触发路径：task-finished 后先来一条「sentence_end 但空文本」的 result（装弹），
+    // 上限到点只会 emitFinal(空→no-op)；随后**又一条**空 result 在超上限之后到达，
+    // 会走 armFinalGrace 的前置分支。若那里顺手 finishEmptyUtterance()，
+    // 这句就被判空收尾、上游被关，紧跟着到达的真文本会被静默丢弃。
+    const upstream = fakeUpstream();
+    const { messages, sink } = fakeSink();
+    const enc = fakeStreamEncoder();
+    const bridge = trackStream({
+      apiKey: FAKE_KEY,
+      connect: upstream.connect,
+      sink,
+      streamEncoder: enc.factory,
+      resultTimeoutMs: 3000,
+      totalBudgetMs: 4000,
+      // 上限 300 < 静默窗 600：留出「上限之后、静默窗之前」这段缝隙
+      finalGraceMaxMs: 300,
+      finalGraceMs: 200,
+      emptySettleQuietMs: 600,
+    });
+
+    bridge.pushAudio(new Uint8Array([0x1a]));
+    await until(() => upstream.sockets.length > 0);
+    const socket = upstream.sockets[0]!;
+    await until(() =>
+      socket.sent.some((s) => typeof s === "string" && s.includes("run-task")),
+    );
+
+    bridge.finishUtterance();
+    await until(() =>
+      socket.sent.some((s) => typeof s === "string" && s.includes("finish-task")),
+    );
+    upstream.taskFinished(socket);
+
+    // ① 先装一次弹（上限还没到）
+    await sleep(100);
+    upstream.result(socket, "", true);
+    // ② 上限已过之后再装一次弹（走前置分支）
+    await sleep(220);
+    upstream.result(socket, "", true);
+    // ③ 真文本在静默窗之内到达
+    await sleep(60);
+    upstream.result(socket, "外头雨小了点", false);
+
+    await until(() => messages.some((m) => m.type === "final"), 2500);
+    expect((messages.find((m) => m.type === "final") as { text: string }).text).toContain(
+      "外头雨小了点",
+    );
     expect(messages.filter((m) => m.type === "final").length).toBe(1);
   });
 });
