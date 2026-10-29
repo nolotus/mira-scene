@@ -76,7 +76,13 @@ export const AUTO_FINISH_QUIET_MS = 900;
  * 比人手点一下「关闭麦克风」仍然快得多。用标点做自适应比整体压低阈值安全：
  * 没标点（长句说到一半）时仍旧等 900ms，不会腰斩。
  */
-export const AUTO_FINISH_SENTENCE_MS = 450;
+export const AUTO_FINISH_SENTENCE_MS = 750;
+
+/**
+ * 走「句末标点」短阈值的最短字数：太短的转写（「好。」「嗯。」）不算一句话说完，
+ * 否则句中停顿一拍就被提交半句，模型只能对着半句瞎答（线上实测「牛头不对马嘴」）。
+ */
+export const AUTO_FINISH_MIN_CHARS = 6;
 
 /** 句末标点：只认中文全角与英文句末，`,，、` 不算（那是句内停顿） */
 const SENTENCE_END = /[。．.!！?？…]$/;
@@ -88,7 +94,9 @@ const SENTENCE_END = /[。．.!！?？…]$/;
 export function autoFinishDelayMs(text: string): number | null {
   const trimmed = typeof text === "string" ? text.trim() : "";
   if (!trimmed) return null;
-  return SENTENCE_END.test(trimmed) ? AUTO_FINISH_SENTENCE_MS : AUTO_FINISH_QUIET_MS;
+  const chars = Array.from(trimmed).length;
+  const sentenceEnd = SENTENCE_END.test(trimmed) && chars >= AUTO_FINISH_MIN_CHARS;
+  return sentenceEnd ? AUTO_FINISH_SENTENCE_MS : AUTO_FINISH_QUIET_MS;
 }
 
 /** 预建连队列上限：1.5s。超出丢最旧帧并计入 `prerollDropped`（见 diagnostics） */

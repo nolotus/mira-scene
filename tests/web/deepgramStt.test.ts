@@ -438,10 +438,11 @@ describe("静音自动收尾：接线（不只是纯函数）", () => {
     await flush();
     h.socket.open();
     h.socket.emit({ type: "interim", text: "我想说的是" });
-    await Bun.sleep(SENTENCE_WAIT);
+    // 在「默认阈值」之前一点点检查：不能收尾（短阈值只给带标点的长句）
+    await Bun.sleep(Math.max(200, AUTO_FINISH_QUIET_MS - 250));
     expect(h.recorder.stopped).toBe(0);
-    // 到默认阈值之后才收尾
-    await Bun.sleep(AUTO_FINISH_QUIET_MS - AUTO_FINISH_SENTENCE_MS + 200);
+    // 过了默认阈值才收尾
+    await Bun.sleep(500);
     expect(h.recorder.stopped).toBe(1);
     stt.abort();
   }, 5000);
@@ -462,8 +463,13 @@ describe("静音自动收尾：接线（不只是纯函数）", () => {
 
 describe("静音自动收尾的阈值自适应", () => {
   test("句末标点 → 短阈值（不必等满 900ms）", () => {
-    for (const text of ["外面还在下雨吗？", "我知道了。", "真的吗！", "好吧…", "OK!"]) {
+    // 句末标点 + 至少 AUTO_FINISH_MIN_CHARS 个字才走短阈值
+    for (const text of ["外面还在下雨吗？", "我知道这件事了。", "真的吗你说什么！"]) {
       expect(autoFinishDelayMs(text)).toBe(AUTO_FINISH_SENTENCE_MS);
+    }
+    // 太短（「好。」「嗯。」）不算一句说完 —— 线上实测这里切半句会让回答牛头不对马嘴
+    for (const text of ["好。", "嗯。", "OK!"]) {
+      expect(autoFinishDelayMs(text)).toBe(AUTO_FINISH_QUIET_MS);
     }
   });
 
@@ -486,6 +492,6 @@ describe("静音自动收尾的阈值自适应", () => {
 
   test("短阈值必须显著小于默认阈值，且仍远大于句内自然停顿", () => {
     expect(AUTO_FINISH_SENTENCE_MS).toBeLessThan(AUTO_FINISH_QUIET_MS);
-    expect(AUTO_FINISH_SENTENCE_MS).toBeGreaterThanOrEqual(400);
+    expect(AUTO_FINISH_SENTENCE_MS).toBeGreaterThanOrEqual(600);
   });
 });
