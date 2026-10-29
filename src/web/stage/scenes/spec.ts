@@ -462,7 +462,8 @@ export const SCENE_SPECS: Record<SceneVariant, SceneSpec> = {
       rimStrength: 1.1,
       shadowSoftness: 0.7,
     },
-    camera: { horizonY: 0.34, fovDeg: 46 },
+    // 中近景：脚落在湿路面上沿，尺度独立于路面透视高度。
+    camera: { horizonY: 0.26, fovDeg: 46, charScale: 0.68 },
     particles: [
       { kind: "rain_far", count: 44, opacity: [0.25, 0.7] },
       { kind: "rain_near", count: 15, opacity: [0.06, 0.18] },

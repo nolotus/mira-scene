@@ -339,6 +339,20 @@ describe("新场景：雨夜街道与酒店门廊", () => {
     expect(validateDirective({ kind: "scene", scene: "hotel_entrance" })).not.toBeNull();
   });
 
+  test("街景显式尺度与湿路面站位契约", () => {
+    const spec = specOf("street_night");
+    const box = charBoxOf(spec);
+    expect(spec.camera.charScale).toBeGreaterThanOrEqual(0.65);
+    expect(spec.camera.charScale).toBeLessThanOrEqual(0.7);
+    expect(box.bottom).toBe("26%");
+    expect(box.height).toBe("38.08%");
+    expect(parseFloat(box.height)).toBeGreaterThanOrEqual(CHAR_SCALE_CONTRACT.MIN_HEIGHT_PCT);
+    expect(parseFloat(box.height)).toBeLessThanOrEqual(CHAR_SCALE_CONTRACT.MAX_OUTDOOR_HEIGHT_PCT);
+    expect(100 - parseFloat(box.bottom) - parseFloat(box.height)).toBeGreaterThanOrEqual(CHAR_SCALE_CONTRACT.MIN_HEADROOM_PCT);
+    expect(box.scale).toBeGreaterThan(charBoxOf(specOf("hotel_entrance")).scale);
+    expect(sceneVars(spec)["--char-height"]).toBe(box.height);
+  });
+
   test("门廊场景角色尺度与站位契约：脚踩台阶、头顶留出余量、占高落在合理区间", () => {
     const box = charBoxOf(specOf("hotel_entrance"));
     // 脚底落在门廊台阶上沿（.hotel-steps height: 8%）

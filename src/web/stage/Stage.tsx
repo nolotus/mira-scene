@@ -14,6 +14,7 @@ import type { CSSProperties } from "react";
 import type { StageProps } from "../../shared/protocol";
 import { describePresence, type Presence } from "../state/presence";
 import { Character } from "./Character";
+import { StageSubtitles } from "./StageSubtitles";
 import { prefetchLine, prefetchSnapshot, startPrefetchAfterLoad, subscribePrefetch } from "./preload";
 import { ClipPlayer } from "./clip/ClipPlayer";
 // 显式扩展名：本目录同时存在 cues.ts（数据层）与 Cues.tsx（渲染层），
@@ -60,7 +61,6 @@ export function Stage({
   const action = useTrigger(state.pendingActions.join(" "));
 
   const tone = state.lastBeat ? toneOf(state.lastBeat) : 0;
-  const hasSubtitle = state.subtitle.trim().length > 0;
 
   /**
    * 素材预取：load 之后 300ms（或空闲回调）才启动，省流模式整轮跳过。
@@ -148,26 +148,7 @@ export function Stage({
             </div>
           ) : null}
 
-          <div
-            className="stage-subtitle"
-            data-empty={hasSubtitle ? "false" : state.characterStatus === "thinking" ? "thinking" : "true"}
-            aria-live="polite"
-          >
-            {hasSubtitle ? (
-              <p key={`sub-${beat.n}`} className="sub">
-                {state.subtitle}
-              </p>
-            ) : state.characterStatus === "thinking" ? (
-              <div className="thinking-cue" role="status" aria-label="Mira 正在思考">
-                <span className="thinking-dots" aria-hidden="true">
-                  <span className="thinking-dot" />
-                  <span className="thinking-dot" />
-                  <span className="thinking-dot" />
-                </span>
-                <span className="thinking-text">Mira 正在思考…</span>
-              </div>
-            ) : null}
-          </div>
+          <StageSubtitles state={state} />
 
           {/* 交互入口的固定挂载槽位：文字 / 语音控件由上层注入，本层只负责位置与安全区 */}
           <div id="dock" className="stage-dock" />

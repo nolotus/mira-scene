@@ -792,7 +792,31 @@
   perspective: 780px;
   transform: translate3d(var(--char-x, 0px), var(--char-y, 0px), 0)
     rotate(var(--char-rot, 0deg)) scale(var(--char-scale, 1));
-  transition: transform 950ms cubic-bezier(0.22, 0.75, 0.25, 1);
+  transition: transform 950ms cubic-bezier(0.22, 0.75, 0.25, 1), filter 0.8s ease;
+}
+
+
+/* 环境光仅作用于 rig 的 filter，不接管动作层的 transform / animation。
+   各场景保持三层 drop-shadow，切景时可逐项插值。 */
+.stage-root[data-scene="cafe_night"] .char-rig {
+  filter: drop-shadow(0 8px 12px rgba(255, 193, 123, 0.16))
+    drop-shadow(0 0 16px rgba(255, 220, 174, 0.08))
+    drop-shadow(0 12px 8px rgba(25, 14, 10, 0.28));
+}
+.stage-root[data-scene="street_night"] .char-rig {
+  filter: drop-shadow(0 8px 12px rgba(79, 123, 180, 0.1))
+    drop-shadow(0 0 16px rgba(100, 160, 255, 0.12))
+    drop-shadow(2px 2px 8px rgba(255, 208, 139, 0.1));
+}
+.stage-root[data-scene="hotel_entrance"] .char-rig {
+  filter: drop-shadow(-3px 0 10px rgba(255, 200, 120, 0.22))
+    drop-shadow(0 0 16px rgba(255, 219, 165, 0.1))
+    drop-shadow(0 10px 6px rgba(20, 13, 10, 0.38));
+}
+.stage-root[data-scene="seaside_dawn"] .char-rig {
+  filter: drop-shadow(0 4px 12px rgba(162, 195, 229, 0.12))
+    drop-shadow(0 0 16px rgba(192, 217, 245, 0.14))
+    drop-shadow(0 10px 10px rgba(29, 48, 65, 0.18));
 }
 
 .char-yaw {
@@ -1694,6 +1718,7 @@
 /* 字幕：底部安全区，长文本限 5 行并优雅截断，绝不遮脸 */
 .stage-subtitle {
   position: relative;
+  display: grid;
   max-height: 30cqh;
   padding: 12px 16px 14px;
   overflow: hidden;
@@ -1708,6 +1733,12 @@
 }
 
 .stage-subtitle[data-empty="true"] { opacity: 0; }
+.subtitle-lines { grid-area: 1 / 1; transition: opacity 340ms ease; }
+.stage-subtitle > .thinking-cue { grid-area: 1 / 1; }
+.subtitle-lines[data-visible="false"] {
+  opacity: 0;
+  pointer-events: none;
+}
 
 .stage-subtitle[data-empty="thinking"] {
   opacity: 1;
@@ -1785,6 +1816,27 @@
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 5;
   animation: subIn 480ms cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+
+/* 一行残影位于字幕内部，不增加字幕区高度或挤压 dock。 */
+.stage-subtitle[data-history="true"] { padding-top: 32px; }
+.stage-subtitle[data-history="true"] .sub { -webkit-line-clamp: 4; }
+.sub-history {
+  position: absolute;
+  top: 8px;
+  left: 16px;
+  right: 16px;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: center;
+  font-size: clamp(12px, 3.3vw, 14px);
+  line-height: 20px;
+  color: #d6dee8;
+  opacity: 0.5;
+  pointer-events: none;
+  animation: subHistoryIn 480ms ease both;
 }
 
 /* 分支选项 */
@@ -2554,3 +2606,5 @@
     rgba(20, 16, 20, 0.5) 2px 6px
   );
 }
+
+@keyframes subHistoryIn { from { opacity: 0; } to { opacity: 0.5; } }
