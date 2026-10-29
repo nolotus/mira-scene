@@ -55,6 +55,8 @@ export const SCENES = [
   "cafe_closing",
   "window_rain",
   "seaside_dawn",
+  "street_night",
+  "hotel_entrance",
 ] as const satisfies readonly SceneVariant[];
 
 /** 指令词汇表（也用于给真模型拼 system prompt） */

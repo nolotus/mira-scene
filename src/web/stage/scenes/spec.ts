@@ -26,7 +26,17 @@ import type { Action, Pose, SceneVariant } from "../../../shared/protocol";
  * `sky / sea / shore` 是「海边的天幕 / 海面 / 岸线」三层，
  * 由 seaside_dawn 使用，各自有渲染器（见 StageBackdrop 的 PLANE_RENDERERS）。
  */
-export type PlaneId = "room" | "window" | "warm" | "fg" | "sky" | "sea" | "shore";
+export type PlaneId =
+  | "room"
+  | "window"
+  | "warm"
+  | "fg"
+  | "sky"
+  | "sea"
+  | "shore"
+  | "street"
+  | "road"
+  | "hotel";
 
 /** 一层景深：有什么层、每层的视差系数、这层里有哪些可见构件 */
 export interface DepthPlane {
@@ -379,6 +389,132 @@ export const SCENE_SPECS: Record<SceneVariant, SceneSpec> = {
       // 没有 glance_window：这是开放海面，没有窗框/玻璃可望
     ],
   },
+
+  /**
+   * 雨夜街道：站在人行道上的那一刻。
+   * 深度层：street（夜空 + 楼体剪影 + 街灯 + 招牌）→ road（透视湿路面、积水与倒影）
+   * → fg（前景雨幕 / 水汽 / 暗角）。
+   * 白名单里**没有** hold_cup（街上没有杯子）与 glance_window（没有窗框可望），
+   * 所以站在街上只能抖、只能回头看。
+   */
+  street_night: {
+    id: "street_night",
+    label: "雨夜街道",
+    depthPlanes: [
+      {
+        id: "street",
+        label: "夜空 / 楼体剪影 / 街灯 / 招牌",
+        parallax: 0.08,
+        props: ["sky", "buildings", "lamp_post", "signs", "storefront"],
+      },
+      {
+        id: "road",
+        label: "透视湿路面 / 积水 / 灯影倒影",
+        parallax: 0.3,
+        props: ["road", "puddle", "reflection", "kerb"],
+      },
+      {
+        id: "fg",
+        label: "前景雨幕 / 水汽 / 暗角",
+        parallax: 0.72,
+        props: ["rain_near", "haze", "vignette"],
+      },
+    ],
+    palette: {
+      base: "#1a2432",
+      depth: "#080d14",
+      sky: "#0b1524",
+      accent: "#ffb45c",
+      key: "#ffd9a8",
+      fill: "#8fb6d8",
+    },
+    lighting: {
+      // 街灯从右上斜打下来：轮廓光偏冷（雨幕与水汽），主光是路灯的橙
+      keyDir: { x: 0.9, y: -0.3 },
+      keyColor: "#ffd9a8",
+      fillColor: "#8fb6d8",
+      rimStrength: 1.1,
+      shadowSoftness: 0.7,
+    },
+    camera: { horizonY: 0.34, fovDeg: 46 },
+    particles: [
+      { kind: "rain_far", count: 44, opacity: [0.25, 0.7] },
+      { kind: "rain_near", count: 15, opacity: [0.06, 0.18] },
+    ],
+    actions: [
+      "blink",
+      "hair_tuck",
+      "sigh",
+      "shiver",
+      "look_back",
+      "nod",
+      "startle",
+      "stand",
+      "lean_in",
+      "turn_away",
+      // 没有 hold_cup：街上没有杯子（也没有桌子）
+      // 没有 glance_window：这是开放街道，没有窗框/玻璃可望
+    ],
+  },
+
+  /**
+   * 酒店楼下门廊：雨棚下等人的那一刻。
+   * 深度层：hotel（门廊立面 / 雨棚 / 暖光溢出 / 台阶）→ fg（前景雨幕 / 水汽 / 暗角）。
+   * 白名单与街道同理：门廊里**没有**杯子，也没有可望的窗（暖光从门里溢出来，但不是窗）。
+   */
+  hotel_entrance: {
+    id: "hotel_entrance",
+    label: "酒店楼下门廊",
+    depthPlanes: [
+      {
+        id: "hotel",
+        label: "门廊立面 / 雨棚 / 暖光溢出 / 台阶",
+        parallax: 0.1,
+        props: ["facade", "entrance", "canopy", "warm_glow", "sign", "steps"],
+      },
+      {
+        id: "fg",
+        label: "前景雨幕 / 水汽 / 暗角",
+        parallax: 0.72,
+        props: ["rain_near", "haze", "vignette"],
+      },
+    ],
+    palette: {
+      base: "#241d24",
+      depth: "#0d0a10",
+      sky: "#0a1220",
+      accent: "#ffc276",
+      key: "#ffe0b0",
+      fill: "#93b6d4",
+    },
+    lighting: {
+      // 门廊的暖光从正面偏下往上照：主光暖、轮廓是雨夜的冷蓝
+      keyDir: { x: -0.2, y: 0.4 },
+      keyColor: "#ffe0b0",
+      fillColor: "#93b6d4",
+      rimStrength: 1.05,
+      shadowSoftness: 0.66,
+    },
+    camera: { horizonY: 0.3, fovDeg: 42 },
+    particles: [
+      { kind: "rain_far", count: 40, opacity: [0.22, 0.62] },
+      { kind: "rain_near", count: 13, opacity: [0.05, 0.16] },
+    ],
+    actions: [
+      "blink",
+      "hair_tuck",
+      "sigh",
+      "shiver",
+      "look_back",
+      "nod",
+      "startle",
+      "stand",
+      "lean_in",
+      "turn_away",
+      // 没有 hold_cup：门廊里没有杯子
+      // 没有 glance_window：暖光来自门里，不是可倚的窗
+    ],
+  },
 };
 
 /** 未知场景的回落目标。降级到这里而不是抛错：渲染期抛错等于白屏 */
@@ -428,6 +564,9 @@ export const RENDERABLE_PLANES: readonly PlaneId[] = [
   "sky",
   "sea",
   "shore",
+  "street",
+  "road",
+  "hotel",
 ];
 
 /** 这份 spec 里没有渲染器的层（现在生产场景与 seaside_dawn 都不该命中） */

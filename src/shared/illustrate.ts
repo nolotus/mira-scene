@@ -46,6 +46,8 @@ export const SCENE_CLAUSE: Record<string, string> = {
   cafe_closing: "The cafe is closing down, half the lamps already off, chairs stacked.",
   window_rain: "The frame is dominated by the rain-covered window onto the street.",
   seaside_dawn: "Dawn over the seashore, low sun over the water, wet sand and dark rocks in the foreground.",
+  street_night: "Rainy night street, wet asphalt reflecting street lamps, dark building silhouettes behind.",
+  hotel_entrance: "Hotel entrance porch at night, warm light spilling out from under the canopy onto the wet ground.",
 };
 
 /** variant 只是「同一幕的另一个机位」，用来让同一 beat 也能产出不同画面 */
