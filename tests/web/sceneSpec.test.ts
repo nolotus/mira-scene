@@ -347,12 +347,17 @@ describe("新场景：雨夜街道与酒店门廊", () => {
     const heightPct = parseFloat(box.height);
     expect(heightPct).toBeGreaterThanOrEqual(CHAR_SCALE_CONTRACT.MIN_HEIGHT_PCT);
     expect(heightPct).toBeLessThanOrEqual(CHAR_SCALE_CONTRACT.MAX_OUTDOOR_HEIGHT_PCT);
-    expect(box.height).toBe("33.6%");
+    expect(box.height).toBe("30.8%");
     // 头顶留出充足余量（至少 10%）
     const bottomPct = parseFloat(box.bottom);
     const headroom = 100 - (bottomPct + heightPct);
     expect(headroom).toBeGreaterThanOrEqual(CHAR_SCALE_CONTRACT.MIN_HEADROOM_PCT);
-    expect(headroom).toBeCloseTo(58.4, 1);
+    expect(headroom).toBeCloseTo(61.2, 1);
+    // **与雨棚的遮挡契约**：头顶（离底 bottom+height）必须低于雨棚下沿（离底 40%）。
+    // 这条是复审抓出来的：只断言「余量 ≥10%」会漏掉穿模（41.6% > 40%）。
+    const headPct = bottomPct + heightPct;
+    const canopyBottomPct = 40;
+    expect(headPct).toBeLessThan(canopyBottomPct);
   });
 
   test("全场景角色尺度契约：各场景 charScale（或等效的 scale 参数）落在同一区间，不允许单个场景偏差超过阈值", () => {

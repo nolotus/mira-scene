@@ -522,10 +522,12 @@ export const SCENE_SPECS: Record<SceneVariant, SceneSpec> = {
       shadowSoftness: 0.66,
     },
     // 角色站位契约：门廊台阶在画面底端 0..8%（.hotel-steps height: 8%），
-    // 角色脚底落在台阶上沿（horizonY: 0.08），charScale 显式定为 0.6，
-    // 使角色高度为 33.6%（头顶落在 41.6%，正好处于雨棚 bottom: 40% 下方），
-    // 留出 58.4% 画面上方余量，与门、台阶、雨棚构成严密透视。
-    camera: { horizonY: 0.08, fovDeg: 42, charScale: 0.6 },
+    // 角色脚底落在台阶上沿（horizonY: 0.08）。
+    // 注意坐标方向：CSS 的 bottom 是「离画面底部」，**越大越靠上**。
+    // 雨棚下沿在离底 40%（.hotel-canopy bottom: 40%），所以头顶必须 < 40%，
+    // 即角色高度必须 < 32%。charScale 0.55 → 高 30.8% → 头顶 38.8%，
+    // 与雨棚留出 1.2% 间隙（0.6 会得到 33.6% / 头顶 41.6%，直接穿进雨棚）。
+    camera: { horizonY: 0.08, fovDeg: 42, charScale: 0.55 },
     particles: [
       { kind: "rain_far", count: 40, opacity: [0.22, 0.62] },
       { kind: "rain_near", count: 13, opacity: [0.05, 0.16] },
