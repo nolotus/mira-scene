@@ -196,32 +196,43 @@ describe("SayExtractor · 模型违约时的护栏", () => {
 });
 
 describe("LiveDirector · 模型输出违约", () => {
-  test("已经流出的脏台词也算异常：发 recoverable error，台词不含指令原文", async () => {
+  test("已经流出的脏台词：违约现在**不报错**，残段整段丢弃、字幕不含指令原文", async () => {
     const original = globalThis.fetch;
     globalThis.fetch = (async () =>
       sseResponse(DIRTY_LIVE_OUTPUT.match(/[\s\S]{1,8}/g) ?? [DIRTY_LIVE_OUTPUT])) as unknown as typeof fetch;
     try {
       const director = new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 });
       const events: SessionEvent[] = [];
-      for await (const event of director.stream(liveInput, new AbortController().signal)) {
-        events.push(event);
+      const logs: string[] = [];
+      const originalWarn = console.warn;
+      console.warn = (...args: unknown[]) => { logs.push(args.map(String).join(" ")); };
+      try {
+        for await (const event of director.stream(liveInput, new AbortController().signal)) {
+          events.push(event);
+        }
+      } finally {
+        console.warn = originalWarn;
       }
 
       const text = events.flatMap((event) => (event.type === "text.delta" ? [event.text] : [])).join("");
       expect(text).not.toContain("directives");
+      // 安全底线不变：违约时那部分残段（可能夹带指令原文）绝不允许进字幕
+      expect(text).not.toContain("kind");
+      // 正向断言：丢弃残段**不能**误伤已经正常流出的前半句
       expect(text).toBe("哦，听错了。这雨声太吵。!");
 
+      // 日志纪律：违约只记长度，绝不把台词原文写进日志
+      expect(logs.join("\n")).not.toContain("哦，听错了");
+      // 新契约：违约不再产生用户可见错误（旧行为会在末尾发 recoverable error，
+      // 用户看到「出错了：上游返回的内容无法解析为 JSON」，整轮台词被吞）
       const errors = events.flatMap((event) => (event.type === "error" ? [event] : []));
-      expect(errors.length).toBe(1);
-      expect(errors[0]?.recoverable).toBe(true);
-      // 不能把脏文本当正常一轮结束：turn 末尾必须是 error 而不是静默收尾
-      expect(events[events.length - 1]?.type).toBe("error");
+      expect(errors).toEqual([]);
     } finally {
       globalThis.fetch = original;
     }
   });
 
-  test("新格式 cues 下的违约：台词干净、不重复投递 cues、末尾仍是 error", async () => {
+  test("新格式 cues 下的违约：台词干净、不重复投递 cues、且不报错", async () => {
     const original = globalThis.fetch;
     globalThis.fetch = (async () =>
       sseResponse(DIRTY_CUES_OUTPUT.match(/[\s\S]{1,8}/g) ?? [DIRTY_CUES_OUTPUT])) as unknown as typeof fetch;
@@ -233,15 +244,15 @@ describe("LiveDirector · 模型输出违约", () => {
       }
 
       const text = events.flatMap((event) => (event.type === "text.delta" ? [event.text] : [])).join("");
-      expect(text).toBe("哦，听错了。这雨声太吵。!");
+      // 安全底线：脏尾巴不进字幕（用输入里**真实存在**的关键字，别写成 vacuous 断言）
       expect(text).not.toContain("cues");
+      expect(text).not.toContain("directives");
+      // 正向断言：合法前半句必须完整流出（防止「丢残段」误伤正常台词）
+      expect(text).toBe("哦，听错了。这雨声太吵。!");
       // CueScanner 只认 say 之前出现的 cues；这段脏尾巴不能变成 directive 事件
       expect(events.filter((event) => event.type === "directive").length).toBe(0);
-
-      const errors = events.flatMap((event) => (event.type === "error" ? [event] : []));
-      expect(errors.length).toBe(1);
-      expect(errors[0]?.recoverable).toBe(true);
-      expect(events[events.length - 1]?.type).toBe("error");
+      // 新契约：不报错（旧行为末尾发 recoverable error）
+      expect(events.filter((event) => event.type === "error")).toEqual([]);
     } finally {
       globalThis.fetch = original;
     }

@@ -301,6 +301,23 @@ export class LiveDirector implements Director {
 
       // ---- 收尾：补完台词 → 再补在后面才扫到的 cues ----
       const payload = parseDirectorPayload(rawAll);
+
+      if (!payload) {
+        // 模型违约（漏引号 / 单引号 / 散文 / 截断）：**不再**把它当用户可见错误，
+        // 也**不**把残留文本当台词交出去。违约时那部分可能夹带 `directives` 的原文
+        // 字面量（2026-10-29 真实踩过：字幕里出现
+        // `!'directives': [{'kind':'emotion',…}]}`），静默当正常台词就等于把它
+        // 交给字幕和 TTS。所以：本轮的残段整段丢弃、本轮安静结束。
+        // 原则：字幕/语音边界可信 > 动作完整性；违约必须可观测，但**只记长度与类别**，
+        // 绝不记原文（原文就是用户会听到的那句话）。
+        console.warn(
+          // 只记长度，**绝不记原文**：emitted 是台词本身（用户会听到的那句话），
+          // 写成 ${emitted} 会把它原样落进日志（实测踩过）。
+          `[director:live] payload invalid turn=${input.turnId} raw=${rawAll.length}chars emitted=${emitted.length}chars`,
+        );
+        return;
+      }
+
       const remainder = remainderOf(payload, emitted) || pending;
 
       for (const piece of chunkText(remainder)) {
@@ -311,7 +328,7 @@ export class LiveDirector implements Director {
         await sleep(LIVE_CHUNK_DELAY_MS, signal);
       }
 
-      if (payload) {
+      {
         // 扫描器已经放出去的那批不重复；剩下的（旧格式 directives / 尾巴才到的 cues）在这里补
         scheduler.feed(payload.cues.slice(Math.max(0, scanner.cues.length)));
         for (const cue of scheduler.advance(spoken)) {
@@ -330,15 +347,6 @@ export class LiveDirector implements Director {
           droppedDirective: Math.max(payload.dropped.directive, scanned.droppedDirective),
           struct: decision,
         };
-      } else {
-        // 解析失败时即使已经流了部分文本也要暴露：模型违约（漏引号/单引号 JSON）下
-        // 那部分可能夹带指令原文，静默当正常台词就等于把它交给字幕和 TTS。
-        yield this.#failure(
-          input,
-          emitted
-            ? "上游输出不是合法 JSON：本轮台词可能被截断或夹带指令原文"
-            : "上游返回的内容无法解析为 JSON",
-        );
       }
     } catch (error) {
       if (signal.aborted) return;
