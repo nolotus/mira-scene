@@ -1,5 +1,5 @@
 /**
- * Mira —— 分层 SVG 角色（骨架版：颈 / 肩 / 躯干 / 上臂 / 头 / 下颌 / 下摆各自独立）
+ * Mira —— 分层 SVG 角色（姿态层 → 动作层 → 胸腔 / 前臂 / 手 / 头发 / 五官 / 杯中物）
  *
  * 全部由 CSS 变量驱动，没有一张位图、没有一个外部字体：
  *   状态（idle/listening/thinking/speaking）→ 躯干前倾量、呼吸周期与幅度、视线、耳侧高光
@@ -7,12 +7,12 @@
  *   情绪（7 种）→ 眉形 / 眼形（每条情绪一套眼睑开口裁剪）/ 瞳孔 / 嘴形 / 红晕 / 呼吸幅度
  *   口型（4 相位）→ 由 subtitle 的字数与内容驱动节奏（非固定循环）
  *   眨眼 → 1.8–7s 随机间隔 + 偶发双眨，由 --blink-name 切换 keyframes 重播
- *   动作（7 种）→ 各自一套多关键帧动画，跑在独立子层上，不与姿态过渡抢 transform
+ *   动作（7 种）→ 独立子层的关键帧；姿态保持在父层，不抢 transform
  */
 
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
-import type { Emotion, Pose, SceneState } from "../../shared/protocol";
+import type { Action, Emotion, Pose, SceneState } from "../../shared/protocol";
 import { EMOTION_ORDER, EMOTION_SPEC, POSE_SPEC, STATUS_SPEC } from "./visuals";
 import { specOf } from "./scenes/spec";
 
@@ -42,14 +42,19 @@ interface PoseRig {
   shrug: number;
   /** 肩宽缩放：侧身时肩膀更「正对镜头」一点 */
   wide: number;
+  /** 姿势视线，与状态 / 情绪视线叠加。 */
+  gazeX: number;
+  gazeY: number;
+  /** 前臂绕肘折叠角；右臂在镜像的局部坐标内使用同一角度。 */
+  elbow: number;
 }
 
-const POSE_RIG: Record<Pose, PoseRig> = {
-  stand: { turn: 0, lean: 0, shrug: 0, wide: 1 },
-  lean_in: { turn: 0, lean: 1, shrug: 9.5, wide: 0.965 },
-  turn_away: { turn: -31, lean: -0.15, shrug: 1.5, wide: 1.06 },
-  hold_cup: { turn: 0, lean: 0.42, shrug: 3, wide: 0.99 },
-  glance_window: { turn: -17, lean: 0.18, shrug: 1.5, wide: 1.02 },
+export const POSE_RIG: Record<Pose, PoseRig> = {
+  stand: { turn: 0, lean: 0, shrug: 0, wide: 1, gazeX: 0, gazeY: 0, elbow: 0 },
+  lean_in: { turn: 0, lean: 1, shrug: 9.5, wide: 0.965, gazeX: 0, gazeY: -1, elbow: 0 },
+  turn_away: { turn: -31, lean: -0.15, shrug: 1.5, wide: 1.06, gazeX: -5, gazeY: 1, elbow: 0 },
+  hold_cup: { turn: 0, lean: 0.42, shrug: 3, wide: 0.99, gazeX: 0, gazeY: 3, elbow: -65 },
+  glance_window: { turn: -17, lean: 0.18, shrug: 1.5, wide: 1.02, gazeX: -8, gazeY: -2, elbow: 0 },
 };
 
 /** 情绪 → 骨架量（呼吸幅度 / 耸肩 / 手臂收拢），让「紧张」「疲惫」写在肩上也读得出来 */
@@ -71,7 +76,7 @@ const EMO_RIG: Record<Emotion, EmoRig> = {
 };
 
 /** 一次性动作时长（ms，400–1400），只用于动画时长，不影响姿态过渡 */
-const ACT_DUR: Record<string, number> = {
+export const ACT_DUR: Record<Action, number> = {
   blink: 340,
   hair_tuck: 1240,
   sigh: 1300,
@@ -183,11 +188,11 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
   const leanPx = rig.lean * 9 + (state.characterStatus === "listening" ? 4.5 : 0);
 
   const rigStyle = vars({
-    // 走位（保留）：整体位置/缩放只负责「站位」，表演交给下面的骨架
-    "--char-x": `${pose.x + status.x}px`,
-    "--char-y": `${(pose.y + status.y) * 0.5}px`,
-    "--char-rot": `${pose.rot}deg`,
-    "--char-scale": `${pose.scale * status.scale}`,
+    // 状态走位：不再把 pose 的位移/缩放叠给整个人，姿势只驱动局部骨架
+    "--char-x": `${status.x}px`,
+    "--char-y": `${status.y * 0.5}px`,
+    "--char-rot": "0deg",
+    "--char-scale": `${status.scale}`,
 
     // ---- 骨架 ----
     "--rig-turn": `${rig.turn}deg`,
@@ -197,6 +202,8 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
     "--shoulder-drop": `${rig.shrug + erg.shrug}px`,
     "--shoulder-wide": `${rig.wide}`,
     "--torso-rot": `${rig.turn * 0.14 + rig.lean * 1.3}deg`,
+    "--forearm-fold": `${rig.elbow}deg`,
+    "--neck-rot": `${leanPx * -0.07}deg`,
     "--arm-l": `${erg.armL - rig.lean * 1.6}deg`,
     "--arm-r": `${erg.armR + rig.lean * 1.6}deg`,
     "--hem-dur": `${status.breathDur}s`,
@@ -209,8 +216,8 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
     "--head-y": `${pose.headY + status.headY + emo.headY + rig.lean * 4}px`,
 
     // ---- 五官 ----
-    "--gaze-x": `${status.gazeX + emo.gazeX}px`,
-    "--gaze-y": `${status.gazeY + emo.gazeY}px`,
+    "--gaze-x": `${rig.gazeX + status.gazeX + emo.gazeX}px`,
+    "--gaze-y": `${rig.gazeY + status.gazeY + emo.gazeY}px`,
     "--eye-open": `${emo.eyeOpen}`,
     "--cheek": `${Math.min(1, emo.cheek * 1.55)}`,
     "--shade": `${pose.shade}`,
@@ -235,6 +242,7 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
           className="char-rig"
           data-emotion={state.emotion}
           data-status={state.characterStatus}
+          data-speaking={state.characterStatus === "speaking" && mouthDrive}
           data-pose={state.pose}
           data-lip={lip}
           data-act={primary ?? "none"}
@@ -377,18 +385,24 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
 
                 {/* 2. 躯干骨架 */}
                 <g className="char-torso">
+                  <g className="char-torso-act">
+                    <g className="char-chest-breathe">
                   {/* 雨衣后领 / 兜帽堆叠 */}
                   <ellipse cx="200" cy="336" rx="72" ry="24" fill="url(#mx-hood)" opacity="0.85" />
 
-                  <g className="char-shoulders">
+                      <g className="char-shoulders">
+                        <g className="char-shoulders-act">
                     {/* 3. 脖子（独立组：前倾时颈前伸、微旋） */}
-                    <g className="char-neck">
+                          <g className="char-neck">
+                            <g className="char-neck-act">
                       <path
                         d="M180,268 L180,326 C180,340 189,349 200,349 C211,349 220,340 220,326 L220,268 Z"
                         fill="url(#mx-skin-neck)"
                       />
                       <ellipse cx="200" cy="308" rx="20" ry="12" fill="#b07f66" opacity="0.45" />
-                    </g>
+
+                            </g>
+                          </g>
 
                     {/* 4. 雨衣上身（琥珀色，湿润高光） */}
                     <path
@@ -402,16 +416,16 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                       fill="url(#mx-coat-dark)"
                     />
                     {/* 门襟 + 拉链 */}
-                    <path d="M200,352 L200,486" stroke="#6b3a12" strokeWidth="2.6" opacity="0.55" />
+                          <path d="M200,352 L200,486" stroke="#6b3a12" strokeWidth="2.6" opacity="0.55" />
                     <rect x="196.5" y="400" width="8" height="14" rx="3" fill="#f3d9a6" opacity="0.7" />
                     {/* 肩线（压肩时整条线一起下去） */}
-                    <path d="M93,370 C88,398 94,438 108,466" stroke="#7d4615" strokeWidth="2.6" fill="none" opacity="0.35" />
-                    <path d="M307,370 C312,398 306,438 292,466" stroke="#7d4615" strokeWidth="2.6" fill="none" opacity="0.35" />
+                          <path d="M93,370 C88,398 94,438 108,466" stroke="#7d4615" strokeWidth="2.6" fill="none" opacity="0.35" />
+                          <path d="M307,370 C312,398 306,438 292,466" stroke="#7d4615" strokeWidth="2.6" fill="none" opacity="0.35" />
                     {/* 肩缝：让「肩」真的看得出来，不是一整块色块 */}
-                    <path d="M176,332 C154,340 124,350 100,362" stroke="#6d3b12" strokeWidth="3" fill="none" opacity="0.5" strokeLinecap="round" />
-                    <path d="M224,332 C246,340 276,350 300,362" stroke="#6d3b12" strokeWidth="3" fill="none" opacity="0.5" strokeLinecap="round" />
-                    <path d="M100,362 C92,372 88,384 88,396 C100,388 108,376 112,360 Z" fill="#5f3311" opacity="0.2" />
-                    <path d="M300,362 C308,372 312,384 312,396 C300,388 292,376 288,360 Z" fill="#5f3311" opacity="0.2" />
+                          <path d="M176,332 C154,340 124,350 100,362" stroke="#6d3b12" strokeWidth="3" fill="none" opacity="0.5" strokeLinecap="round" />
+                          <path d="M224,332 C246,340 276,350 300,362" stroke="#6d3b12" strokeWidth="3" fill="none" opacity="0.5" strokeLinecap="round" />
+                          <path d="M100,362 C92,372 88,384 88,396 C100,388 108,376 112,360 Z" fill="#5f3311" opacity="0.2" />
+                          <path d="M300,362 C308,372 312,384 312,396 C300,388 292,376 288,360 Z" fill="#5f3311" opacity="0.2" />
                     {/* 湿润高光 + 窗外冷色白边光（上半段） */}
                     <path
                       d="M186,330 C160,336 136,346 118,358 C104,368 98,382 95,402"
@@ -441,17 +455,19 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                       opacity="0.45"
                     />
                     {/* 兜帽抽绳：领口不再是一块死板的深色 */}
-                    <path d="M166,342 C162,364 160,382 164,396" stroke="#e8c48a" strokeWidth="2" fill="none" opacity="0.6" strokeLinecap="round" />
-                    <path d="M234,342 C238,364 240,382 236,396" stroke="#e8c48a" strokeWidth="2" fill="none" opacity="0.6" strokeLinecap="round" />
+                          <path d="M166,342 C162,364 160,382 164,396" stroke="#e8c48a" strokeWidth="2" fill="none" opacity="0.6" strokeLinecap="round" />
+                          <path d="M234,342 C238,364 240,382 236,396" stroke="#e8c48a" strokeWidth="2" fill="none" opacity="0.6" strokeLinecap="round" />
                     <circle cx="164" cy="399" r="2.6" fill="#e8c48a" opacity="0.8" />
                     <circle cx="236" cy="399" r="2.6" fill="#e8c48a" opacity="0.8" />
                     {/* 上衣不再散布雨珠：原来的 4+4 个静止淡色椭圆在待机态也一直亮着，
                         没有水流方向、没有形成轨迹，读作「污渍」而不是雨。雨的表达交给
                         窗外的 rain-layer 与演出期的 vfx。 */}
-                  </g>
+
+                        </g>
+                      </g>
 
                   {/* 5. 下摆（独立组，origin 在肩部：呼吸/动作时 2–4px 延迟摆动） */}
-                  <g className="char-hem">
+                      <g className="char-hem">
                     <path
                       className="coat-hem"
                       d="M112,470 C102,494 98,524 98,560 L302,560 C302,524 298,494 288,470 C246,486 154,486 112,470 Z"
@@ -465,14 +481,18 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                       strokeLinecap="round"
                     />
                     {/* 衣摆的湿褶：让下摆不是一块梯形 */}
-                    <path d="M150,504 C146,522 144,540 146,558" stroke="#7d4615" strokeWidth="2.2" fill="none" opacity="0.3" />
-                    <path d="M246,498 C250,520 252,540 250,558" stroke="#7d4615" strokeWidth="2.2" fill="none" opacity="0.3" />
+                        <path d="M150,504 C146,522 144,540 146,558" stroke="#7d4615" strokeWidth="2.2" fill="none" opacity="0.3" />
+                        <path d="M246,498 C250,520 252,540 250,558" stroke="#7d4615" strokeWidth="2.2" fill="none" opacity="0.3" />
 
-                  </g>
-                </g>
+                      </g>
+
+
+                    </g>
+                  </g></g>
 
                 {/* 6. 侧发（压在雨衣上，不随头旋转） */}
-                <g className="char-sidehair">
+                  <g className="char-head"><g className="char-head-act">
+                    <g className="char-sidehair">
                   <path
                     d="M140.8,237.2 C129.6,275.6 124.8,322 131.2,366.8 C134.4,390.8 144,411.6 160,426 C153.6,395.6 152,358.8 153.6,325.2 C155.2,296.4 156.8,264.4 160,238.8 Z"
                     fill="url(#mx-hair)"
@@ -482,68 +502,91 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                     fill="url(#mx-hair)"
                   />
                   {/* 侧发上的细碎发丝：头发不是一块纯色 */}
-                  <path d="M148,246 C139,292 137,344 144,384" stroke="#5d4231" strokeWidth="2" fill="none" opacity="0.5" strokeLinecap="round" />
-                  <path d="M252,246 C261,292 263,344 256,384" stroke="#5d4231" strokeWidth="2" fill="none" opacity="0.5" strokeLinecap="round" />
-                </g>
+                      <path d="M148,246 C139,292 137,344 144,384" stroke="#5d4231" strokeWidth="2" fill="none" opacity="0.5" strokeLinecap="round" />
+                      <path d="M252,246 C261,292 263,344 256,384" stroke="#5d4231" strokeWidth="2" fill="none" opacity="0.5" strokeLinecap="round" />
+                    </g>
 
                 {/* 7. 上臂（独立组，origin 在肩关节）：姿势与动作都会抬肩/转袖 */}
-                {/* 袖口与手共用上臂骨架，不另加位移动画；腕根藏进收口内，避免转肩时脱节。 */}
+                {/* 上臂 → 肘部前臂 → 袖口与手；右侧在镜像局部坐标内折叠。 */}
+                  </g>
+                </g>
+
                 <g className="char-arm char-arm-l">
+                  <g className="char-arm-l-act">
                   <path
                     className="sleeve"
-                    d="M96,368 C86,398 80,436 80,468 C80,479 83,488 87,494 Q101,501 116,493 C115,480 116,466 117,452 C119,420 122,392 124,372 Z"
+                    d="M96,368 C86,390 82,420 80,440 Q98,450 118,440 C119,414 122,392 124,372 Z"
                     fill="url(#mx-sleeve)"
                   />
-                  <path d="M118,378 C112,412 108,450 110,478 M84,471 Q92,479 91,486 M115,470 Q105,480 108,488" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
+                    <g className="char-forearm">
+                      <path d="M80,438 Q98,446 118,438 L117,452 C116,466 115,480 116,493 Q101,501 87,494 C83,488 80,479 80,468 Z" fill="url(#mx-sleeve)" />
+                      <path d="M116,442 Q108,460 110,478 M84,471 Q92,479 91,486 M115,470 Q105,480 108,488" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
                   {/* 袖口内腔 → 腕掌 → 前侧布边：遮挡关系让手从袖内长出来。 */}
-                  <path d="M86,487 Q101,493 116,486 L116,499 Q102,507 88,499 Z" fill="#593619" />
+                      <g className="char-hand">
+                        <path d="M86,487 Q101,493 116,486 L116,499 Q102,507 88,499 Z" fill="#593619" />
                   <path
                     d="M92,493 C92,501 91,507 92,514 L94,526 Q96,532 101,533 L107,533 Q113,532 114,526 L114,516 Q119,520 121,516 Q122,513 118,508 L111,501 L110,493 Z"
                     fill="url(#mx-skin)" stroke="#b77f64" strokeWidth="1.2" strokeLinejoin="round"
                   />
-                  <path d="M110,505 Q106,511 111,517 M99,524 L100,529 M105,524 L105,530" fill="none" stroke="#bd896e" strokeWidth="1.1" strokeLinecap="round" opacity="0.65" />
-                  <path d="M85,483 Q100,490 116,483 L116,494 Q102,502 87,495 Z" fill="url(#mx-sleeve)" stroke="#754719" strokeWidth="1.2" />
-                  <path d="M88,486 Q101,492 113,487" fill="none" stroke="#e4b16f" strokeWidth="1.6" opacity="0.7" />
-                  <path d="M89,493 Q102,499 114,493" fill="none" stroke="#603816" strokeWidth="1.2" />
-                </g>
-                <g className="char-arm char-arm-r">
+                        <path d="M110,505 Q106,511 111,517 M99,524 L100,529 M105,524 L105,530" fill="none" stroke="#bd896e" strokeWidth="1.1" strokeLinecap="round" opacity="0.65" />
+                        <path d="M85,483 Q100,490 116,483 L116,494 Q102,502 87,495 Z" fill="url(#mx-sleeve)" stroke="#754719" strokeWidth="1.2" />
+                        <path d="M88,486 Q101,492 113,487" fill="none" stroke="#e4b16f" strokeWidth="1.6" opacity="0.7" />
+                        <path d="M89,493 Q102,499 114,493" fill="none" stroke="#603816" strokeWidth="1.2" /></g>
+                      </g>
+
+                    </g>
+                  </g>
+                  <g className="char-arm char-arm-r">
+                    <g className="char-arm-r-act">
                   {/* 镜像局部几何，保留原有左右臂的独立 CSS 变换与动作钩子。 */}
-                  <g transform="translate(400,0) scale(-1,1)">
+                      <g transform="translate(400,0) scale(-1,1)">
                     <path
                       className="sleeve"
-                      d="M96,368 C86,398 80,436 80,468 C80,479 83,488 87,494 Q101,501 116,493 C115,480 116,466 117,452 C119,420 122,392 124,372 Z"
+                      d="M96,368 C86,390 82,420 80,440 Q98,450 118,440 C119,414 122,392 124,372 Z"
                       fill="url(#mx-sleeve)"
                     />
-                    <path d="M118,378 C112,412 108,450 110,478 M84,471 Q92,479 91,486 M115,470 Q105,480 108,488" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
-                    <path d="M86,487 Q101,493 116,486 L116,499 Q102,507 88,499 Z" fill="#593619" />
+                        <g className="char-forearm">
+                          <path d="M80,438 Q98,446 118,438 L117,452 C116,466 115,480 116,493 Q101,501 87,494 C83,488 80,479 80,468 Z" fill="url(#mx-sleeve)" />
+                          <path d="M116,442 Q108,460 110,478 M84,471 Q92,479 91,486 M115,470 Q105,480 108,488" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
+                          <g className="char-hand">
+                            <path d="M86,487 Q101,493 116,486 L116,499 Q102,507 88,499 Z" fill="#593619" />
                     <path
                       d="M92,493 C92,501 91,507 92,514 L94,526 Q96,532 101,533 L107,533 Q113,532 114,526 L114,516 Q119,520 121,516 Q122,513 118,508 L111,501 L110,493 Z"
                       fill="url(#mx-skin)" stroke="#b77f64" strokeWidth="1.2" strokeLinejoin="round"
                     />
-                    <path d="M110,505 Q106,511 111,517 M99,524 L100,529 M105,524 L105,530" fill="none" stroke="#bd896e" strokeWidth="1.1" strokeLinecap="round" opacity="0.65" />
-                    <path d="M85,483 Q100,490 116,483 L116,494 Q102,502 87,495 Z" fill="url(#mx-sleeve)" stroke="#754719" strokeWidth="1.2" />
-                    <path d="M88,486 Q101,492 113,487" fill="none" stroke="#e4b16f" strokeWidth="1.6" opacity="0.7" />
-                    <path d="M89,493 Q102,499 114,493" fill="none" stroke="#603816" strokeWidth="1.2" />
-                  </g>
-                </g>
+                            <path d="M110,505 Q106,511 111,517 M99,524 L100,529 M105,524 L105,530" fill="none" stroke="#bd896e" strokeWidth="1.1" strokeLinecap="round" opacity="0.65" />
+                            <path d="M85,483 Q100,490 116,483 L116,494 Q102,502 87,495 Z" fill="url(#mx-sleeve)" stroke="#754719" strokeWidth="1.2" />
+                            <path d="M88,486 Q101,492 113,487" fill="none" stroke="#e4b16f" strokeWidth="1.6" opacity="0.7" />
+                            <path d="M89,493 Q102,499 114,493" fill="none" stroke="#603816" strokeWidth="1.2" /></g>
+                          </g>
+                        </g>
+
+                      </g>
+                    </g>
 
                 {/* 杯子（hold_cup 才出现） */}
-                <g className="mug">
+                    <g className="mug">
                   <ellipse cx="200" cy="496" rx="62" ry="26" fill="url(#mx-muglight)" />
-                  <path d="M174,452 L226,452 L221,508 C220,515 214,520 207,520 L193,520 C186,520 180,515 179,508 Z" fill="#f4efe6" />
-                  <path d="M174,452 L226,452 L224,467 L176,467 Z" fill="#e4d9c8" />
-                  <path d="M226,463 C241,463 246,473 244,483 C242,494 233,500 222,500" stroke="#f4efe6" strokeWidth="6" fill="none" strokeLinecap="round" />
+                      <path d="M174,452 L226,452 L221,508 C220,515 214,520 207,520 L193,520 C186,520 180,515 179,508 Z" fill="#f4efe6" />
+                      <path d="M174,452 L226,452 L224,467 L176,467 Z" fill="#e4d9c8" />
+                      <path d="M226,463 C241,463 246,473 244,483 C242,494 233,500 222,500" stroke="#f4efe6" strokeWidth="6" fill="none" strokeLinecap="round" />
                   <ellipse cx="200" cy="452" rx="26" ry="8" fill="#6b4423" />
-                  <ellipse cx="200" cy="451" rx="19" ry="5" fill="#432815" />
+                      <g className="char-cup-liquid"><ellipse cx="200" cy="451" rx="19" ry="5" fill="#432815" />
+                        <path d="M188,451 Q200,447 212,451" stroke="#a57c51" strokeWidth="1" fill="none" /></g>
                   {/* 杯壁反光：杯子不是白色梯形 */}
-                  <path d="M181,472 C180,486 181,498 184,510" stroke="#d8cdbb" strokeWidth="2" fill="none" opacity="0.7" />
-                </g>
+                        <path d="M181,472 C180,486 181,498 184,510" stroke="#d8cdbb" strokeWidth="2" fill="none" opacity="0.7" />
+                      </g>
+
+                      <g className="char-cup-grip">
+                        <path d="M175,467 Q166,463 166,470 L168,484 Q171,490 179,488 L178,482 L173,481 L173,476 L179,477 L179,471 Z" fill="url(#mx-skin)" stroke="#b77f64" strokeWidth="1" />
+                        <path d="M225,467 Q234,463 234,470 L232,484 Q229,490 221,488 L222,482 L227,481 L227,476 L221,477 L221,471 Z" fill="url(#mx-skin)" stroke="#b77f64" strokeWidth="1" />
+                      </g>
 
                 {/* 8. 头部（面部特征整体跟随 --head-rot / --head-unyaw） */}
-                <g className="char-head char-head-front">
-                  <g className="char-head-act">
+                      <g className="char-head char-head-front">
+                        <g className="char-head-act">
                     {/* 头整体缩到 0.8×（绕颈根 200,330）：头身比从娃娃脸改成成年女性 */}
-                    <g className="char-head-scale" transform="translate(200,330) scale(0.8) translate(-200,-330)">
+                          <g className="char-head-scale" transform="translate(200,330) scale(0.8) translate(-200,-330)">
                       {/* 耳朵 + 倾听时的耳侧高光 */}
                       <ellipse cx="126" cy="208" rx="11" ry="17" fill="url(#mx-skin)" />
                       <ellipse cx="274" cy="208" rx="11" ry="17" fill="url(#mx-skin)" />
@@ -560,37 +603,37 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                       />
 
                       {/* 侧向阴影（turn_away / glance_window） */}
-                      <g clipPath="url(#mx-face-clip)">
+                            <g clipPath="url(#mx-face-clip)">
                         <rect className="face-shade" x="110" y="90" width="180" height="220" fill="url(#mx-shade)" />
                         <ellipse cx="200" cy="120" rx="96" ry="34" fill="#0a1018" opacity="0.18" />
-                      </g>
+                            </g>
 
                       {/* 脸颊红晕（强度由情绪给，位置随情绪微移） */}
-                      <g className="cheeks">
+                            <g className="cheeks">
                         <ellipse className="cheek" cx="158" cy="234" rx="27" ry="18" fill="url(#mx-cheek)" />
                         <ellipse className="cheek" cx="242" cy="234" rx="27" ry="18" fill="url(#mx-cheek)" />
-                      </g>
+                            </g>
 
                       {/* 眼：7 种情绪各一套眼睑开口（裁剪），瞳孔大小与朝向单独给 */}
-                      <g className="eyes">
+                            <g className="eyes">
                         {EMOTION_ORDER.map((e) => (
-                          <g className={`eye-set eye-set-${e}`} key={e}>
+                              <g className={`eye-set eye-set-${e}`} key={e}>
                             {EYES.map(({ cx, side }) => (
-                              <g className="eye" key={side}>
-                                <g className="eye-shape">
-                                  <g className="eye-blink">
-                                    <g clipPath={`url(#mx-eyec-${side}-${e})`}>
+                                <g className="eye" key={side}>
+                                  <g className="eye-shape">
+                                    <g className="eye-blink">
+                                      <g clipPath={`url(#mx-eyec-${side}-${e})`}>
                                       <ellipse cx={cx} cy="198" rx="16.5" ry="12.4" fill="#fbf3ee" />
                                       <ellipse cx={cx} cy="198" rx="16.5" ry="12.4" fill="#2a1712" opacity="0.12" />
-                                      <g className="gaze">
-                                        <g className="gaze-act">
+                                        <g className="gaze">
+                                          <g className="gaze-act">
                                           <circle cx={cx} cy="199.5" r="9.2" fill="url(#mx-iris)" />
                                           <circle cx={cx} cy="199.5" r={3.8 * EYE_PUPIL[e]} fill="#150d09" />
                                           <circle cx={cx - 3} cy="196" r="2.9" fill="#ffffff" opacity="0.92" />
                                           <circle cx={cx + 3.6} cy="202.8" r="1.3" fill="#ffffff" opacity="0.45" />
+                                          </g>
                                         </g>
                                       </g>
-                                    </g>
                                     {/* 眼线不在裁剪里：闭眼时也要有形状 */}
                                     <path
                                       d={eyeUpper(cx, EYE_SHAPE[e])}
@@ -612,23 +655,23 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                                       strokeWidth="2.8"
                                       strokeLinecap="round"
                                     />
+                                    </g>
                                   </g>
                                 </g>
-                              </g>
                             ))}
-                          </g>
+                              </g>
                         ))}
-                      </g>
+                            </g>
 
                       {/* 眉毛：7 种情绪各一份 */}
-                      <g className="brows">
+                            <g className="brows">
                         {EMOTION_ORDER.map((e) => (
-                          <g className={`brow brow-${e}`} key={e}>
-                            <path d={BROWS[e][0]} />
-                            <path d={BROWS[e][1]} />
-                          </g>
+                              <g className={`brow brow-${e}`} key={e}>
+                                <path d={BROWS[e][0]} />
+                                <path d={BROWS[e][1]} />
+                              </g>
                         ))}
-                      </g>
+                            </g>
 
                       {/* 鼻子 */}
                       <path
@@ -641,27 +684,30 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                       />
 
                       {/* 嘴 + 下颌：闭合相位用情绪嘴形，1/2/3 相位是说话口型 */}
-                      <g className="char-jaw">
-                        <g className="mouths">
+                            <g className="char-jaw">
+                              <g className="char-jaw-act">
+                                <g className="mouths">
                           {EMOTION_ORDER.map((e) => (
-                            <g className={`mouth mouth-${e}`} key={e}>
-                              <path d={MOUTHS[e].path} fill={MOUTHS[e].fill} />
+                                  <g className={`mouth mouth-${e}`} key={e}>
+                                    <path d={MOUTHS[e].path} fill={MOUTHS[e].fill} />
                               {MOUTHS[e].lip ? <path d={MOUTHS[e].lip} fill="#b5675c" opacity="0.5" /> : null}
-                            </g>
+                                  </g>
                           ))}
                           {LIPS.map((l, i) =>
                             l.path ? (
-                              <g className={`lip lip-${i}`} key={i}>
-                                <path d={l.path} fill={l.fill} />
+                                  <g className={`lip lip-${i}`} key={i}>
+                                    <path d={l.path} fill={l.fill} />
                                 {l.teeth ? <path d={l.teeth} fill="#fdf3ea" opacity="0.85" /> : null}
-                              </g>
+                                  </g>
                             ) : null,
                           )}
-                        </g>
-                      </g>
+                                </g>
+
+                              </g>
+                            </g>
 
                       {/* 情绪标记：焦虑的汗滴 / 惊讶的爆点（只在对应情绪出现） */}
-                      <g className="char-marks">
+                            <g className="char-marks">
                         <path
                           className="mark mark-sweat"
                           d="M284,168 C290,178 294,184 294,190 C294,197 289,201 283,201 C277,201 272,197 272,190 C272,184 278,178 284,168 Z"
@@ -669,7 +715,7 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                           opacity="0.8"
                         />
                         <path className="mark mark-spark" d="M300,132 L303,141 L312,144 L303,147 L300,156 L297,147 L288,144 L297,141 Z" fill="#fff2c9" opacity="0.9" />
-                      </g>
+                            </g>
 
                       {/* 刘海 + 湿发丝 */}
                       <path
@@ -685,12 +731,12 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                         d="M184,164 C194,150 206,140 216,134 C226,128 238,136 248,146 C256,152 262,156 268,160 C254,158 232,158 210,159 C198,160 188,162 184,164 Z"
                         fill="#241811"
                       />
-                      <path d="M236,140 C222,152 214,170 212,188" stroke="#6d4c35" strokeWidth="2.4" fill="none" opacity="0.6" strokeLinecap="round" />
-                      <path d="M168,146 C160,160 156,174 156,186" stroke="#6d4c35" strokeWidth="2" fill="none" opacity="0.45" strokeLinecap="round" />
+                            <path d="M236,140 C222,152 214,170 212,188" stroke="#6d4c35" strokeWidth="2.4" fill="none" opacity="0.6" strokeLinecap="round" />
+                            <path d="M168,146 C160,160 156,174 156,186" stroke="#6d4c35" strokeWidth="2" fill="none" opacity="0.45" strokeLinecap="round" />
                       {/* 额前碎发：多几缕，刘海才不是一块色板 */}
-                      <path d="M206,116 C197,132 191,150 190,166" stroke="#6d4c35" strokeWidth="1.8" fill="none" opacity="0.38" strokeLinecap="round" />
-                      <path d="M142,138 C134,154 131,170 132,184" stroke="#6d4c35" strokeWidth="1.6" fill="none" opacity="0.3" strokeLinecap="round" />
-                      <path d="M262,132 C268,150 270,168 268,182" stroke="#6d4c35" strokeWidth="1.6" fill="none" opacity="0.3" strokeLinecap="round" />
+                            <path d="M206,116 C197,132 191,150 190,166" stroke="#6d4c35" strokeWidth="1.8" fill="none" opacity="0.38" strokeLinecap="round" />
+                            <path d="M142,138 C134,154 131,170 132,184" stroke="#6d4c35" strokeWidth="1.6" fill="none" opacity="0.3" strokeLinecap="round" />
+                            <path d="M262,132 C268,150 270,168 268,182" stroke="#6d4c35" strokeWidth="1.6" fill="none" opacity="0.3" strokeLinecap="round" />
                       {/* 湿发的反光带（复用已有的 mx-hair-sheen 渐变） */}
                       <path
                         d="M140,116 C162,102 196,98 226,106 C198,120 172,132 152,150 C144,140 140,128 140,116 Z"
@@ -701,31 +747,31 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                       <path className="strand" d="M132,182 C146,174 158,166 170,158 C158,172 144,186 136,198 Z" fill="#2a1c12" opacity="0.92" />
 
                       {/* 银色星星发夹 */}
-                      <g className="hairpin" transform="translate(152,158) rotate(-14)">
-                        <g className="pin-act">
+                            <g className="hairpin" transform="translate(152,158) rotate(-14)">
+                              <g className="pin-act">
                           <path
                             d="M0,-13 L3.8,-4.6 L12.6,-3.7 L6.2,2.2 L7.9,11 L0,6.4 L-7.9,11 L-6.2,2.2 L-12.6,-3.7 L-3.8,-4.6 Z"
                             fill="#eaf2fb"
                             stroke="#b9cde2"
                             strokeWidth="1"
                           />
-                          <path d="M0,-7 L1.6,-1.8 L6.6,-1.4 L2.7,1.9 L4,6.6 L0,3.8 L-4,6.6 L-2.7,1.9 L-6.6,-1.4 L-1.6,-1.8 Z" fill="#ffffff" opacity="0.85" />
+                                <path d="M0,-7 L1.6,-1.8 L6.6,-1.4 L2.7,1.9 L4,6.6 L0,3.8 L-4,6.6 L-2.7,1.9 L-6.6,-1.4 L-1.6,-1.8 Z" fill="#ffffff" opacity="0.85" />
                           <circle className="pin-spark" cx="9" cy="-11" r="2.6" fill="#ffffff" />
-                        </g>
-                      </g>
+                              </g>
+                            </g>
                       {/* 第二枚小发夹：鬓角一小撮，别在耳后 */}
-                      <g className="hairpin" transform="translate(141,206) rotate(-28)">
-                        <g className="pin-act">
-                          <path d="M0,-7 L2.1,-2.5 L6.9,-2 L3.4,1.2 L4.3,6 L0,3.5 L-4.3,6 L-3.4,1.2 L-6.9,-2 L-2.1,-2.5 Z" fill="#e6eef8" stroke="#a9c0d8" strokeWidth="0.9" />
+                            <g className="hairpin" transform="translate(141,206) rotate(-28)">
+                              <g className="pin-act">
+                                <path d="M0,-7 L2.1,-2.5 L6.9,-2 L3.4,1.2 L4.3,6 L0,3.5 L-4.3,6 L-3.4,1.2 L-6.9,-2 L-2.1,-2.5 Z" fill="#e6eef8" stroke="#a9c0d8" strokeWidth="0.9" />
                           <circle className="pin-spark" cx="6" cy="-7" r="1.8" fill="#ffffff" />
+                              </g>
+                            </g>
+                          </g>
                         </g>
                       </g>
-                    </g>
-                  </g>
-                </g>
 
                 {/* 9. 别头发：抬起的手臂（前景，压在头部之上，靠透视缩短表现「伸过去」） */}
-                <g className="char-reach">
+                      <g className="char-reach">
                   {/* 前臂：后粗前细，斜着向发夹方向伸 */}
                   <path
                     className="reach-arm"
@@ -734,15 +780,16 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                   />
                   {/* 袖口 + 掌 + 指：整体上移 14、左移 6 —— 头缩到 0.8× 后发夹随之上移，
                       原来手停在旧位置会悬空约 20~30 单位（几何近似，未逐帧校） */}
-                  <g transform="translate(-6,-14)">
-                  <path d="M158.4,285.2 C163.2,279.6 176,279.6 180.8,284.4 L179.2,292.4 C174.4,297.2 163.2,297.2 158.4,292.4 Z" fill="url(#mx-coat-dark)" opacity="0.9" />
+                        <g transform="translate(-6,-14)">
+                          <path d="M158.4,285.2 C163.2,279.6 176,279.6 180.8,284.4 L179.2,292.4 C174.4,297.2 163.2,297.2 158.4,292.4 Z" fill="url(#mx-coat-dark)" opacity="0.9" />
                   {/* 手掌 + 手指朝发夹 */}
                   <path className="reach-hand" d="M165.6,282 C160,274 157.6,263.6 160.8,257.2 C164,250.8 170.4,250 173.6,256.4 C175.2,262 174.4,269.2 172.8,274 Z" fill="url(#mx-skin)" />
-                  <path d="M161.6,258 C163.2,251.6 168,248.4 172,251.6" stroke="#c58a6d" strokeWidth="1.8" fill="none" opacity="0.7" />
-                  <path d="M166.4,255.6 L170.4,246" stroke="#f5d6bd" strokeWidth="4.2" strokeLinecap="round" />
-                  <path d="M172,257.2 L176.8,248.4" stroke="#f5d6bd" strokeWidth="4" strokeLinecap="round" />
-                  </g>
-                </g>
+                          <path d="M161.6,258 C163.2,251.6 168,248.4 172,251.6" stroke="#c58a6d" strokeWidth="1.8" fill="none" opacity="0.7" />
+                          <path d="M166.4,255.6 L170.4,246" stroke="#f5d6bd" strokeWidth="4.2" strokeLinecap="round" />
+                          <path d="M172,257.2 L176.8,248.4" stroke="#f5d6bd" strokeWidth="4" strokeLinecap="round" />
+                        </g>
+                      </g>
+
 
                 {/* 10. 思考：头顶飘散的光点 */}
                 <g className="think-motes">

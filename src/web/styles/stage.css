@@ -782,7 +782,7 @@
   position: absolute;
   inset: 0;
   transform-origin: 50% 92%;
-  animation: breathe var(--breath-dur, 4.6s) ease-in-out infinite;
+  /* Breathing belongs to the chest, not the character silhouette. */
 }
 
 .char-rig {
@@ -836,7 +836,7 @@
   transform-box: view-box;
   transform-origin: 200px 336px;
   transform: translate(var(--neck-fwd, 0px), calc(var(--neck-fwd, 0px) * 0.5))
-    rotate(calc(var(--neck-fwd, 0px) * -0.07));
+    rotate(var(--neck-rot, 0deg));
   transition: transform 900ms cubic-bezier(0.22, 0.75, 0.25, 1);
 }
 
@@ -890,6 +890,50 @@
   transform-origin: 162px 348px;
   opacity: 0;
   transition: opacity 180ms linear;
+}
+
+/* Persistent pose → action → articulation. Each layer owns one transform. */
+.char-torso-act, .char-chest-breathe, .char-shoulders-act,
+.char-neck-act, .char-arm-l-act, .char-arm-r-act, .char-jaw-act {
+  transform-box: view-box;
+}
+.char-torso-act, .char-chest-breathe { transform-origin: 200px 500px; }
+.char-shoulders-act { transform-origin: 200px 360px; }
+.char-neck-act { transform-origin: 200px 336px; }
+.char-arm-l-act { transform-origin: 113px 369px; }
+.char-arm-r-act { transform-origin: 287px 369px; }
+.char-jaw-act { transform-origin: 200px 246px; }
+.char-chest-breathe {
+  animation: chestBreath var(--breath-dur, 4.6s) ease-in-out infinite;
+}
+.char-forearm {
+  transform-box: view-box;
+  transform-origin: 100px 440px;
+  transform: rotate(var(--forearm-fold, 0deg));
+  transition: transform 900ms cubic-bezier(0.22, 0.75, 0.25, 1);
+}
+.char-cup-grip { opacity: var(--cup, 0); transition: opacity 620ms ease; }
+.char-cup-liquid {
+  transform-box: view-box;
+  transform-origin: 200px 451px;
+  animation: liquidSettle 3.8s ease-in-out infinite;
+}
+.char-rig[data-act="shiver"] .char-cup-liquid {
+  animation: liquidShiver var(--act-dur) ease-out both;
+}
+@keyframes chestBreath {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scaleX(calc(1 + var(--breath-amp, 1) * 0.003)) scaleY(calc(1 + var(--breath-amp, 1) * 0.005)); }
+}
+@keyframes liquidSettle {
+  0%, 100% { transform: scaleY(1); }
+  50% { transform: scaleY(0.85); }
+}
+@keyframes liquidShiver {
+  0%, 100% { transform: rotate(0deg); }
+  18%, 46% { transform: rotate(-4deg); }
+  30%, 62% { transform: rotate(3deg); }
+  80% { transform: rotate(-1deg); }
 }
 
 /* ---- 面部基础件 ------------------------------------------------------ */
@@ -1052,7 +1096,9 @@
 .char-rig[data-lip="2"] .lip-2 { opacity: 1; }
 .char-rig[data-lip="3"] .lip-3 { opacity: 1; }
 
-.char-rig[data-status="speaking"] .mouth { opacity: 0; }
+.char-rig[data-lip="1"] .mouth,
+.char-rig[data-lip="2"] .mouth,
+.char-rig[data-lip="3"] .mouth { opacity: 0; }
 
 /* 下颌跟着口型开合 */
 .char-rig[data-lip="1"] .char-jaw { transform: translateY(2.6px) scaleY(1.03); }
@@ -1082,7 +1128,7 @@
 .char-rig[data-status="thinking"] .think-motes circle:nth-child(3) { animation-delay: 2.2s; }
 
 /* 说话：轻微点头（只在没有一次性动作时接管，动作优先） */
-.char-rig[data-status="speaking"][data-act="none"] .char-head-act {
+.char-rig[data-speaking="true"][data-act="none"] .char-head-act {
   animation: speakBob 1.15s ease-in-out infinite;
 }
 
@@ -1107,7 +1153,7 @@
 .char-rig[data-act="hair_tuck"] .char-reach {
   animation: reachHair var(--act-dur, 1240ms) cubic-bezier(0.36, 0.7, 0.3, 1) both;
 }
-.char-rig[data-act="hair_tuck"] .char-arm-l {
+.char-rig[data-act="hair_tuck"] .char-arm-l-act {
   animation: armTuck var(--act-dur, 1240ms) ease-in-out both;
 }
 .char-rig[data-act="hair_tuck"] .char-head-act {
@@ -1124,13 +1170,13 @@
 }
 
 /* 叹气：吸气抬胸 → 塌肩 → 低头 → 缓回，下巴跟着落一下 */
-.char-rig[data-act="sigh"] .char-shoulders {
+.char-rig[data-act="sigh"] .char-shoulders-act {
   animation: sighChest var(--act-dur, 1300ms) ease-in-out both;
 }
 .char-rig[data-act="sigh"] .char-head-act {
   animation: sighHead var(--act-dur, 1300ms) ease-in-out both;
 }
-.char-rig[data-act="sigh"] .char-jaw {
+.char-rig[data-act="sigh"] .char-jaw-act {
   animation: sighJaw var(--act-dur, 1300ms) ease-in-out both;
 }
 .char-rig[data-act="sigh"] .char-hem {
@@ -1138,16 +1184,16 @@
 }
 
 /* 冷颤：肩/头/袖/下摆同一拍抖，眼也缩一下 */
-.char-rig[data-act="shiver"] .char-shoulders {
+.char-rig[data-act="shiver"] .char-shoulders-act {
   animation: shiverBody var(--act-dur, 720ms) linear both;
 }
 .char-rig[data-act="shiver"] .char-head-act {
   animation: shiverHead var(--act-dur, 720ms) linear both;
 }
-.char-rig[data-act="shiver"] .char-arm-l {
+.char-rig[data-act="shiver"] .char-arm-l-act {
   animation: shiverArmL var(--act-dur, 720ms) linear both;
 }
-.char-rig[data-act="shiver"] .char-arm-r {
+.char-rig[data-act="shiver"] .char-arm-r-act {
   animation: shiverArmR var(--act-dur, 720ms) linear both;
 }
 .char-rig[data-act="shiver"] .char-hem {
@@ -1161,10 +1207,10 @@
 .char-rig[data-act="look_back"] .char-head-act {
   animation: lookBackHead var(--act-dur, 1040ms) cubic-bezier(0.3, 0.8, 0.3, 1) both;
 }
-.char-rig[data-act="look_back"] .char-shoulders {
+.char-rig[data-act="look_back"] .char-shoulders-act {
   animation: lookBackBody var(--act-dur, 1040ms) ease-in-out both;
 }
-.char-rig[data-act="look_back"] .char-neck {
+.char-rig[data-act="look_back"] .char-neck-act {
   animation: lookBackNeck var(--act-dur, 1040ms) ease-in-out both;
 }
 
@@ -1172,7 +1218,7 @@
 .char-rig[data-act="nod"] .char-head-act {
   animation: nodHead var(--act-dur, 760ms) cubic-bezier(0.3, 0.85, 0.3, 1) both;
 }
-.char-rig[data-act="nod"] .char-shoulders {
+.char-rig[data-act="nod"] .char-shoulders-act {
   animation: nodBody var(--act-dur, 760ms) ease-in-out both;
 }
 
@@ -1180,16 +1226,16 @@
 .char-rig[data-act="startle"] .char-head-act {
   animation: startleHead var(--act-dur, 620ms) cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
-.char-rig[data-act="startle"] .char-shoulders {
+.char-rig[data-act="startle"] .char-shoulders-act {
   animation: startleBody var(--act-dur, 620ms) cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
-.char-rig[data-act="startle"] .char-jaw {
+.char-rig[data-act="startle"] .char-jaw-act {
   animation: startleJaw var(--act-dur, 620ms) ease-out both;
 }
-.char-rig[data-act="startle"] .char-arm-l {
+.char-rig[data-act="startle"] .char-arm-l-act {
   animation: startleArmL var(--act-dur, 620ms) ease-out both;
 }
-.char-rig[data-act="startle"] .char-arm-r {
+.char-rig[data-act="startle"] .char-arm-r-act {
   animation: startleArmR var(--act-dur, 620ms) ease-out both;
 }
 .char-rig[data-act="startle"] .eye-shape {
@@ -1480,16 +1526,16 @@
 /* ---- 身体参与加码：别头发 / 惊到 让肩、躯干、衣摆一起走 -----------------
    （笔试要求：动作不能只有脸在动，所以这三条把上半身全带上） */
 
-.char-rig[data-act="hair_tuck"] .char-shoulders {
+.char-rig[data-act="hair_tuck"] .char-shoulders-act {
   animation: tuckBody var(--act-dur, 1240ms) ease-in-out both;
 }
-.char-rig[data-act="hair_tuck"] .char-torso {
+.char-rig[data-act="hair_tuck"] .char-torso-act {
   animation: tuckTorso var(--act-dur, 1240ms) ease-in-out both;
 }
 .char-rig[data-act="hair_tuck"] .char-hem {
   animation: tuckHem var(--act-dur, 1240ms) ease-in-out both;
 }
-.char-rig[data-act="startle"] .char-torso {
+.char-rig[data-act="startle"] .char-torso-act {
   animation: startleTorso var(--act-dur, 620ms) cubic-bezier(0.2, 0.9, 0.2, 1) both;
 }
 
