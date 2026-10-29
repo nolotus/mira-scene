@@ -111,7 +111,9 @@ export const CUE_TEMPLATES: Readonly<Record<CueKind, { durationMs: number; layer
   window_call: {
     durationMs: 1600,
     layers: [
-      { target: "rain", from: 0.3, to: 0.62, atMs: 0, durationMs: 900 },
+      // 这里**不再**放 target:"rain"：cue 的雨是铺满舞台的独立层（.cue-rain，
+      // 76°/84° 重复渐变），在室内咖啡馆会变成整屏斜线（owner 实测「语音回复时
+      // 全屏下雨」）。「望向窗外」的情绪靠冷光与推镜表达即可，天气由场景层负责。
       { target: "glow", from: 0.12, to: 0.36, atMs: 80, durationMs: 1400 },
       { target: "camera", from: 0.45, to: 0, atMs: 160, durationMs: 900 },
       { target: "char", from: 0.6, to: 0.1, atMs: 620, durationMs: 560 },
@@ -130,7 +132,7 @@ export const CUE_TEMPLATES: Readonly<Record<CueKind, { durationMs: number; layer
   close_down: {
     durationMs: 2200,
     layers: [
-      { target: "rain", from: 0.5, to: 0.28, atMs: 0, durationMs: 2200 },
+      // 同上：情绪收场不该在室内铺全屏雨幕
       { target: "glow", from: 0.34, to: 0.06, atMs: 60, durationMs: 1100 },
       { target: "camera", from: 0.3, to: 0, atMs: 220, durationMs: 980 },
       { target: "char", from: 0.5, to: 0.05, atMs: 940, durationMs: 760 },

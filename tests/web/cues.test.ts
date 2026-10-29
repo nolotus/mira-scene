@@ -392,3 +392,28 @@ describe("不同内容 → 不同演出（闪电只属于 storm）", () => {
     expect(new Set(shapes).size).toBe(4);
   });
 });
+
+describe("室内情绪演出不得铺全屏雨（owner 实测：语音回复时整屏斜线）", () => {
+  // 背景：cue 的 rain 层是**铺满舞台**的独立层（.cue-rain，76°/84° 重复渐变），
+  // 与场景层负责的窗外雨不是一回事。室内只要命中「电话/外面」「难过」就会
+  // 触发 window_call / close_down，而它们原本各带一条 rain 层 → 整屏斜线。
+  const indoor = ["cafe_night", "cafe_closing"] as const;
+
+  for (const scene of indoor) {
+    test(`${scene}：电话 / 难过 不得产生 rain 层`, () => {
+      const cases = [
+        { subtitle: "给你打个电话吧", emotion: "neutral" as const },
+        { subtitle: "我在等一个人", emotion: "sad" as const },
+        { subtitle: "外面雨好大", emotion: "neutral" as const },
+      ];
+      for (const item of cases) {
+        const cue = composeCue(
+          createInitialScene({ scene, emotion: item.emotion, subtitle: item.subtitle }),
+          0,
+        );
+        const layers = cue?.layers ?? [];
+        expect(layers.some((layer) => layer.target === "rain")).toBe(false);
+      }
+    });
+  }
+});

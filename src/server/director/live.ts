@@ -420,7 +420,16 @@ export class LiveDirector implements Director {
       messages.push({ role: item.role === "user" ? "user" : "assistant", content: item.text });
     }
     const sceneHint = `[画面] 场景=${input.scene.scene} 情绪=${input.scene.emotion} 姿势=${input.scene.pose}；已演过的显著画面=${input.scene.playedBeats.join(",") || "无"}`;
-    messages.push({ role: "user", content: `${sceneHint}\n玩家：${input.userText}` });
+    // 格式提醒放在**最后**：模型对结尾处的指令最敏感。线上实测同一提示词下
+    // 偶发「吐 30~52 字纯叙述、完全不包 JSON」，那一轮就会被安全规则整段丢弃，
+    // 用户体感是「看见自己的字幕、但她没回话」。结尾加这句能显著降低违约率，
+    // 且不改变任何既有契约（仍是同一个 JSON、同样的字段）。
+    const formatReminder =
+      "（只输出一个 JSON 对象：{\"cues\":[…]或[],\"say\":\"台词\"}。不要代码围栏、不要解释、不要 JSON 以外的任何字符。）";
+    messages.push({
+      role: "user",
+      content: `${sceneHint}\n玩家：${input.userText}\n\n${formatReminder}`,
+    });
     return messages;
   }
 
