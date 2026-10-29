@@ -40,6 +40,10 @@ describe("Mock 导演的 beat 选择", () => {
     expect(selectMockBeat("是不是该打烊了", 2, fired).id).toBe("scene_closing");
     expect(selectMockBeat("我看看窗外", 2, fired).id).toBe("scene_window");
     expect(selectMockBeat("还是回店里坐吧", 2, fired).id).toBe("scene_back_inside");
+    // 新加的两个地点：说「上街 / 出门」切街道，说「去酒店 / 楼下等」切门廊
+    expect(selectMockBeat("我们上街去吧", 2, fired).id).toBe("scene_street");
+    expect(selectMockBeat("我们出门走走吧", 2, fired).id).toBe("scene_street");
+    expect(selectMockBeat("去酒店楼下等吧", 2, fired).id).toBe("scene_hotel");
   });
 
   test("场景 beat 各只演一次（同一地点不会被反复切）", () => {
@@ -50,7 +54,7 @@ describe("Mock 导演的 beat 选择", () => {
     const fired = new Set(["opening"]);
     for (const text of ["你今天怎么样", "嗯……", "那你呢"]) {
       const id = selectMockBeat(text, 3, fired).id;
-      expect(["scene_closing", "scene_window", "scene_back_inside", "scene_seaside"]).not.toContain(id);
+      expect(["scene_closing", "scene_window", "scene_back_inside", "scene_seaside", "scene_street", "scene_hotel"]).not.toContain(id);
     }
   });
 });
@@ -69,5 +73,28 @@ describe("Mock 的场景指令必须过服务端白名单", () => {
     for (const directive of scenes) {
       expect(validateDirective(directive)).not.toBeNull();
     }
+  });
+  test("场景 beat 里的动作/姿势都在该场景的白名单内（街上、酒店不许 hold_cup / glance_window）", async () => {
+    const { isActionAllowed } = await import("../../src/web/stage/scenes/spec.ts");
+    const { MOCK_BEATS } = await import("../../src/server/director/mock.ts");
+    let checked = 0;
+    for (const beat of MOCK_BEATS) {
+      const directives = [
+        ...(beat.cues ?? []).map((cue) => cue.directive),
+        ...beat.steps.flatMap((step) => (step.kind === "directive" ? [step.directive] : [])),
+      ];
+      const sceneDirective = directives.find((d) => d.kind === "scene");
+      if (!sceneDirective || sceneDirective.kind !== "scene") continue;
+      checked += 1;
+      for (const directive of directives) {
+        if (directive.kind === "action") {
+          expect(isActionAllowed(sceneDirective.scene, directive.action)).toBe(true);
+        }
+        if (directive.kind === "pose") {
+          expect(isActionAllowed(sceneDirective.scene, directive.pose)).toBe(true);
+        }
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
   });
 });

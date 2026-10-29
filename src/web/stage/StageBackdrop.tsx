@@ -136,6 +136,52 @@ const SPRAY_DOTS = [
   { left: 88, size: 1.9, delay: -3.1, duration: 8.8 },
 ] as const;
 
+/** 街道两侧的楼体剪影：位置固定（bottom 对齐地平线 66%） */
+const STREET_BLOCKS = [
+  { left: -4, width: 16, top: 18, height: 48 },
+  { left: 10, width: 13, top: 24, height: 42 },
+  { left: 22, width: 10, top: 30, height: 36 },
+  { left: 68, width: 11, top: 26, height: 40 },
+  { left: 78, width: 14, top: 16, height: 50 },
+  { left: 91, width: 14, top: 22, height: 44 },
+] as const;
+
+/** 楼体上亮着的窗：一小格一小格暖光 */
+const STREET_WINDOWS = [
+  { left: 1.5, top: 23, w: 1.6, h: 2.4, o: 0.5 },
+  { left: 5.5, top: 31, w: 1.4, h: 2, o: 0.32 },
+  { left: 12, top: 28, w: 1.8, h: 2.6, o: 0.46 },
+  { left: 15.5, top: 38, w: 1.4, h: 2, o: 0.26 },
+  { left: 23.5, top: 34, w: 1.6, h: 2.2, o: 0.4 },
+  { left: 70, top: 30, w: 1.8, h: 2.4, o: 0.44 },
+  { left: 74, top: 38, w: 1.4, h: 2, o: 0.28 },
+  { left: 80, top: 21, w: 1.8, h: 2.6, o: 0.5 },
+  { left: 84.5, top: 29, w: 1.6, h: 2.2, o: 0.34 },
+  { left: 93, top: 27, w: 1.8, h: 2.4, o: 0.42 },
+  { left: 97, top: 35, w: 1.4, h: 2, o: 0.24 },
+] as const;
+
+/** 街灯：灯头 + 灯杆（灯杆落到地平线）+ 光晕 */
+const STREET_LAMPS = [
+  { left: 27, top: 30 },
+  { left: 75, top: 26 },
+] as const;
+
+/** 湿路面上的倒影：路灯、招牌被水膜拉长的一条条竖光 */
+const ROAD_REFLECTIONS = [
+  { left: 26, width: 7, height: 24, color: "rgba(255, 190, 120, 0.55)" },
+  { left: 74, width: 6, height: 20, color: "rgba(255, 200, 140, 0.45)" },
+  { left: 11, width: 10, height: 13, color: "rgba(255, 96, 140, 0.22)" },
+  { left: 59, width: 9, height: 10, color: "rgba(96, 190, 255, 0.26)" },
+] as const;
+
+/** 积水：几摊被路灯照亮的水洼 */
+const ROAD_PUDDLES = [
+  { left: 12, top: 10, width: 20, height: 6 },
+  { left: 44, top: 18, width: 26, height: 7 },
+  { left: 70, top: 8, width: 15, height: 5 },
+] as const;
+
 /** 一段波线：一条起伏的正弦路径（SVG 视口被拉宽成一条细带） */
 function WaveLine({ wave }: { wave: (typeof SEA_WAVES)[number] }) {
   return (
@@ -435,6 +481,114 @@ export const PLANE_RENDERERS: Partial<Record<PlaneId, (spec: SceneSpec) => React
       <div className="lightning">
         <span />
       </div>
+    </>
+  ),
+
+  // ---- 雨夜街道：夜空 + 楼体剪影 + 亮着的窗 + 街灯 + 霓虹（最远） ----
+  street: () => (
+    <>
+      <div className="street-sky" />
+      <div className="street-buildings">
+        {STREET_BLOCKS.map((block, i) => (
+          <span
+            key={i}
+            className={`st-bldg b${i + 1}`}
+            style={{
+              left: `${block.left}%`,
+              width: `${block.width}%`,
+              top: `${block.top}%`,
+              height: `${block.height}%`,
+            }}
+          />
+        ))}
+      </div>
+      <div className="street-windows">
+        {STREET_WINDOWS.map((win, i) => (
+          <span
+            key={i}
+            className="st-win"
+            style={{
+              left: `${win.left}%`,
+              top: `${win.top}%`,
+              width: `${win.w}%`,
+              height: `${win.h}%`,
+              opacity: win.o,
+            }}
+          />
+        ))}
+      </div>
+      <div className="street-signs">
+        <span className="st-sign s1" />
+        <span className="st-sign s2" />
+        <span className="st-sign s3" />
+      </div>
+      <div className="street-lamps">
+        {STREET_LAMPS.map((lamp, i) => (
+          <span key={i} className="st-lamp" style={{ left: `${lamp.left}%`, top: `${lamp.top}%` }}>
+            <span className="lamp-head" />
+            <span className="lamp-arm" />
+            <span className="lamp-halo" />
+          </span>
+        ))}
+      </div>
+    </>
+  ),
+
+  // ---- 透视湿路面：路面 + 透视梯形 + 灯影倒影 + 积水（近景） ----
+  road: () => (
+    <>
+      <div className="street-road" />
+      <div className="street-road-area">
+        <div className="road-perspective" />
+        <div className="road-kerb" />
+        <div className="road-reflections">
+          {ROAD_REFLECTIONS.map((ref, i) => (
+            <span
+              key={i}
+              className="road-ref"
+              style={{
+                left: `${ref.left}%`,
+                width: `${ref.width}%`,
+                height: `${ref.height}%`,
+                background: ref.color,
+              }}
+            />
+          ))}
+        </div>
+        <div className="road-puddles">
+          {ROAD_PUDDLES.map((puddle, i) => (
+            <span
+              key={i}
+              className="road-puddle"
+              style={{
+                left: `${puddle.left}%`,
+                top: `${puddle.top}%`,
+                width: `${puddle.width}%`,
+                height: `${puddle.height}%`,
+              }}
+            />
+          ))}
+        </div>
+      </div>
+    </>
+  ),
+
+  // ---- 酒店门廊：立面 + 招牌 + 雨棚 + 门里溢出的暖光 + 台阶 ----
+  hotel: () => (
+    <>
+      <div className="hotel-facade" />
+      <div className="hotel-sign" />
+      <div className="hotel-entrance">
+        <span className="ent-glass" />
+        <span className="ent-frame" />
+      </div>
+      <div className="hotel-canopy">
+        <span className="canopy-top" />
+        <span className="canopy-edge" />
+        <span className="canopy-drips" />
+      </div>
+      <div className="hotel-spill" />
+      <div className="hotel-steps" />
     </>
   ),
 };

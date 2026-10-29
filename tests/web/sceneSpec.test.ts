@@ -244,3 +244,97 @@ describe("reducer 过滤场景外动作", () => {
     expect(result.machine.scene.pose).toBe("hold_cup");
   });
 });
+
+/**
+ * 新场景：雨夜街道（street_night）与酒店楼下门廊（hotel_entrance）。
+ * 与海边同一套路 —— 加数据 + 加渲染器 + 加白名单，不另起一套背景组件。
+ */
+describe("新场景：雨夜街道与酒店门廊", () => {
+  const NEW_SCENES: SceneVariant[] = ["street_night", "hotel_entrance"];
+
+  test("两个新场景数据完整，且每一层都有渲染器（切过去不会空场）", () => {
+    for (const id of NEW_SCENES) {
+      const spec = specOf(id);
+      expect(spec.id).toBe(id);
+      expect(spec.label.length).toBeGreaterThan(0);
+      expect(spec.actions.length).toBeGreaterThan(0);
+      expect(spec.depthPlanes.length).toBeGreaterThan(0);
+      expect(unsupportedPlanes(spec)).toEqual([]);
+      for (const plane of spec.depthPlanes) {
+        expect(RENDERABLE_PLANES).toContain(plane.id);
+      }
+      for (const value of Object.values(spec.palette)) {
+        expect(value).toMatch(/^#[0-9a-f]{6}$/i);
+      }
+    }
+  });
+
+  test("深度层：街道是 街/路/前景，门廊是 门廊/前景", () => {
+    expect(specOf("street_night").depthPlanes.map((p) => p.id)).toEqual(["street", "road", "fg"]);
+    expect(specOf("hotel_entrance").depthPlanes.map((p) => p.id)).toEqual(["hotel", "fg"]);
+  });
+
+  test("街道的渲染器真的画出了夜空、楼体剪影、街灯与透视湿路面", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { StageBackdrop } = await import("../../src/web/stage/StageBackdrop");
+    const html = renderToStaticMarkup(createElement(StageBackdrop, { scene: "street_night" }));
+    for (const marker of [
+      "street-sky", // 夜空
+      "st-bldg", // 楼体剪影
+      "st-win", // 亮着的窗
+      "st-lamp", // 街灯
+      "st-sign", // 霓虹招牌
+      "street-road", // 湿路面
+      "road-perspective", // 透视梯形
+      "road-ref", // 灯影倒影
+      "road-puddle", // 积水
+      "vignette", // 暗角
+    ]) {
+      expect(html).toContain(marker);
+    }
+  });
+
+  test("门廊的渲染器真的画出了立面、雨棚、门里溢出的暖光与台阶", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement } = await import("react");
+    const { StageBackdrop } = await import("../../src/web/stage/StageBackdrop");
+    const html = renderToStaticMarkup(createElement(StageBackdrop, { scene: "hotel_entrance" }));
+    for (const marker of [
+      "hotel-facade", // 门廊立面
+      "hotel-sign", // 招牌
+      "hotel-entrance", // 门
+      "ent-glass", // 门里的暖光
+      "hotel-canopy", // 雨棚
+      "canopy-drips", // 雨棚滴水
+      "hotel-spill", // 暖光溢出到地面
+      "hotel-steps", // 台阶
+    ]) {
+      expect(html).toContain(marker);
+    }
+  });
+
+  test("白名单：街上与门廊都没有杯子与窗，所以容不下 hold_cup / glance_window", () => {
+    for (const id of NEW_SCENES) {
+      expect(isActionAllowed(id, "hold_cup")).toBe(false);
+      expect(isActionAllowed(id, "glance_window")).toBe(false);
+      expect(isActionAllowed(id, "stand")).toBe(true);
+      expect(isActionAllowed(id, "shiver")).toBe(true);
+      expect(isActionAllowed(id, "look_back")).toBe(true);
+      expect(missingProps(specOf(id), "hold_cup")).toEqual(["cup"]);
+      expect(missingProps(specOf(id), "glance_window")).toEqual(["window"]);
+    }
+  });
+
+  test("reducer 在街上真的把 hold_cup 丢掉（不是只写在 spec 里）", () => {
+    const scene = createInitialScene({ scene: "street_night", lastBeat: "keep" });
+    expect(applyDirective(scene, { kind: "pose", pose: "hold_cup" }, "t1")).toBe(scene);
+    expect(applyDirective(scene, { kind: "pose", pose: "stand" }, "t1").pose).toBe("stand");
+  });
+
+  test("两个新场景在服务端白名单里（否则切过去会被丢成空场）", async () => {
+    const { validateDirective } = await import("../../src/server/scene/validate.ts");
+    expect(validateDirective({ kind: "scene", scene: "street_night" })).not.toBeNull();
+    expect(validateDirective({ kind: "scene", scene: "hotel_entrance" })).not.toBeNull();
+  });
+});

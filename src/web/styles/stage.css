@@ -2118,3 +2118,299 @@
   outline: 2px solid #f2b45c;
   outline-offset: 2px;
 }
+
+/* ============================================================================
+   雨夜街道 street_night / 酒店楼下门廊 hotel_entrance
+   ---------------------------------------------------------------------------
+   街道三层：street（夜空 + 楼体剪影 + 亮着的窗 + 街灯 + 霓虹）
+             → road（透视湿路面 + 灯影倒影 + 积水）
+             → fg（前景雨幕）
+   门廊两层：hotel（立面 + 招牌 + 雨棚 + 门里溢出的暖光 + 台阶）→ fg（前景雨幕）
+   构图契约：地平线用 --horizon-y（街道 34%、门廊 30%），角色脚底与它对齐。
+   全部是渐变 + clip-path，没有位图。
+   ========================================================================== */
+
+.sc-street,
+.sc-road,
+.sc-hotel {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* --- 街道：夜空 ----------------------------------------------------------- */
+
+.street-sky {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    180deg,
+    #04070d 0%,
+    #0a1524 38%,
+    #101d2b 58%,
+    #16242f 66%,
+    #0b1017 100%
+  );
+}
+
+.street-buildings {
+  position: absolute;
+  inset: 0;
+}
+
+.st-bldg {
+  position: absolute;
+  background: linear-gradient(180deg, #0b1220 0%, #070c14 70%, #05080e 100%);
+  box-shadow: inset 0 1px 0 rgba(150, 180, 210, 0.12);
+}
+
+.street-windows {
+  position: absolute;
+  inset: 0;
+}
+
+.st-win {
+  position: absolute;
+  background: linear-gradient(180deg, rgba(255, 214, 150, 0.85), rgba(255, 186, 110, 0.45));
+  box-shadow: 0 0 6px rgba(255, 190, 120, 0.35);
+}
+
+.street-signs {
+  position: absolute;
+  inset: 0;
+}
+
+.st-sign {
+  position: absolute;
+  border-radius: 2px;
+  opacity: 0.85;
+}
+
+.st-sign.s1 {
+  left: 8%;
+  top: 30%;
+  width: 9%;
+  height: 2.2%;
+  background: rgba(255, 96, 140, 0.75);
+  box-shadow: 0 0 10px rgba(255, 96, 140, 0.45);
+}
+
+.st-sign.s2 {
+  left: 60%;
+  top: 24%;
+  width: 7%;
+  height: 1.8%;
+  background: rgba(96, 190, 255, 0.7);
+  box-shadow: 0 0 10px rgba(96, 190, 255, 0.4);
+}
+
+.st-sign.s3 {
+  left: 40%;
+  top: 36%;
+  width: 5%;
+  height: 1.4%;
+  background: rgba(120, 255, 190, 0.55);
+  box-shadow: 0 0 8px rgba(120, 255, 190, 0.35);
+}
+
+.street-lamps {
+  position: absolute;
+  inset: 0;
+}
+
+.st-lamp {
+  position: absolute;
+  /* 灯杆一路落到地平线（top 66%），所以杆高 = 66% − 灯头高度 */
+  height: 32%;
+}
+
+.st-lamp .lamp-head {
+  position: absolute;
+  left: -3px;
+  top: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #ffd9a0;
+  box-shadow: 0 0 10px 3px rgba(255, 196, 120, 0.55);
+}
+
+.st-lamp .lamp-arm {
+  position: absolute;
+  left: 0;
+  top: 3px;
+  height: calc(100% - 3px);
+  width: 2px;
+  background: linear-gradient(180deg, rgba(120, 140, 160, 0.5), rgba(60, 74, 88, 0.35));
+}
+
+.st-lamp .lamp-halo {
+  position: absolute;
+  left: -18px;
+  top: -16px;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 196, 120, 0.32), transparent 68%);
+}
+
+/* --- 街道：透视湿路面 ----------------------------------------------------- */
+
+.street-road {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--horizon-y, 34%);
+  background: linear-gradient(180deg, #16222e 0%, #0d151d 42%, #070b11 100%);
+}
+
+.street-road-area {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--horizon-y, 34%);
+}
+
+/* 近大远小的梯形：路面两侧向外张，灭点在地平线中间 */
+.road-perspective {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(150, 190, 230, 0.12), rgba(30, 45, 60, 0) 55%);
+  clip-path: polygon(44% 0%, 56% 0%, 118% 100%, -18% 100%);
+}
+
+.road-kerb {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: linear-gradient(90deg, rgba(180, 210, 235, 0.35), rgba(120, 150, 180, 0.12));
+}
+
+.road-reflections {
+  position: absolute;
+  inset: 0;
+}
+
+.road-ref {
+  position: absolute;
+  bottom: 0;
+  border-radius: 50% 50% 0 0;
+  filter: blur(2px);
+}
+
+.road-puddles {
+  position: absolute;
+  inset: 0;
+}
+
+.road-puddle {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(60% 100% at 50% 30%, rgba(150, 190, 230, 0.22), rgba(120, 160, 200, 0.05) 70%);
+  filter: blur(1px);
+}
+
+/* --- 酒店门廊：立面 / 招牌 / 雨棚 / 暖光溢出 / 台阶 ------------------------ */
+
+.hotel-facade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, #0d1220 0%, #17141c 46%, #241d24 78%, #191319 100%);
+}
+
+.hotel-sign {
+  position: absolute;
+  left: 50%;
+  top: 12%;
+  transform: translateX(-50%);
+  width: 26%;
+  height: 3.4%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(255, 200, 130, 0.9), rgba(255, 170, 90, 0.65));
+  box-shadow: 0 0 18px rgba(255, 186, 110, 0.45);
+}
+
+.hotel-entrance {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 34%;
+  height: 42%;
+}
+
+.ent-glass {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255, 226, 176, 0.95), rgba(255, 186, 110, 0.8));
+  box-shadow: 0 0 40px rgba(255, 196, 120, 0.5);
+}
+
+.ent-frame {
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(40, 28, 22, 0.55);
+}
+
+.hotel-canopy {
+  position: absolute;
+  left: 50%;
+  bottom: 40%;
+  transform: translateX(-50%);
+  width: 46%;
+  height: 7%;
+}
+
+.canopy-top {
+  position: absolute;
+  inset: 0 0 40% 0;
+  border-radius: 4px 4px 0 0;
+  background: linear-gradient(180deg, #3d2b24, #241812);
+}
+
+.canopy-edge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 34%;
+  height: 34%;
+  background: linear-gradient(180deg, #55372a, #2a1a14);
+}
+
+.canopy-drips {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 40%;
+  background: repeating-linear-gradient(90deg, rgba(190, 220, 245, 0.3) 0 2px, transparent 2px 9px);
+}
+
+/* 暖光从门里溢到湿地上 */
+.hotel-spill {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 58%;
+  height: 26%;
+  background: radial-gradient(60% 100% at 50% 0%, rgba(255, 198, 120, 0.42), rgba(255, 198, 120, 0) 72%);
+}
+
+.hotel-steps {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  width: 46%;
+  height: 8%;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(120, 110, 120, 0.35) 0 2px,
+    rgba(20, 16, 20, 0.5) 2px 6px
+  );
+}

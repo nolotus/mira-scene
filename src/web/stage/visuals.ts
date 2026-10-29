@@ -58,6 +58,10 @@ export const SCENE_LABEL: Record<SceneVariant, string> = {
   window_rain: "窗前落雨",
   // 海边：破晓时分的海岸（有渲染器，可以真的切过去）
   seaside_dawn: "海边破晓",
+  // 雨夜街道：湿地反光与街灯
+  street_night: "雨夜街道",
+  // 酒店楼下门廊：雨棚下的暖光
+  hotel_entrance: "酒店门廊",
 };
 
 export const ACTION_LABEL: Record<Action, string> = {

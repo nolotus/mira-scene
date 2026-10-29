@@ -71,8 +71,9 @@ const camera = (value: "push_in" | "pull_back" | "whip_pan" | "shake" | "settle"
   md({ kind: "camera", move: value });
 const vfx = (value: "lightning" | "rain_heavy" | "rain_light" | "warm_glow" | "lights_dim" | "steam_wisp"): MockStep =>
   md({ kind: "vfx", vfx: value });
-const scene = (value: "cafe_night" | "cafe_closing" | "window_rain" | "seaside_dawn"): MockStep =>
-  md({ kind: "scene", scene: value });
+const scene = (
+  value: "cafe_night" | "cafe_closing" | "window_rain" | "seaside_dawn" | "street_night" | "hotel_entrance",
+): MockStep => md({ kind: "scene", scene: value });
 
 /**
  * 主要 beat 表。priority 决定「这句话同时命中多条时听谁的」。
@@ -167,6 +168,48 @@ export const MOCK_BEATS: readonly MockBeat[] = [
       { atChar: 0, directive: { kind: "emotion", emotion: "curious" } },
       { atChar: 6, directive: { kind: "camera", move: "push_in" } },
       { atChar: 15, directive: { kind: "action", action: "look_back" } },
+    ],
+  },
+  {
+    // 街上：雨夜街道（street_night）。街上**没有杯子也没有窗**，
+    // 所以这里只能用 stand / shiver / look_back，绝不能出现 hold_cup / glance_window。
+    id: "scene_street",
+    match: /去街上|上街|街上|出门|出去走走|走到街上|出去|外头/,
+    priority: 81,
+    once: true,
+    steps: [
+      say("……你确定现在出去？"),
+      say("街上全是水。"),
+      say("路灯把我的影子拉得很长。"),
+    ],
+    cues: [
+      { atChar: 0, directive: { kind: "scene", scene: "street_night" } },
+      { atChar: 0, directive: { kind: "emotion", emotion: "anxious" } },
+      { atChar: 10, directive: { kind: "action", action: "shiver" } },
+      { atChar: 16, directive: { kind: "pose", pose: "stand" } },
+      { atChar: 16, directive: { kind: "camera", move: "push_in" } },
+      { atChar: 28, directive: { kind: "action", action: "look_back" } },
+    ],
+  },
+  {
+    // 酒店楼下门廊（hotel_entrance）。门廊里**没有杯子，也没有可望的窗**，
+    // 所以这里只能用 stand / nod / look_back，绝不能出现 hold_cup / glance_window。
+    id: "scene_hotel",
+    match: /去酒店|酒店|楼下等|楼下|门廊|大堂|前台|入住|check\s?in/i,
+    priority: 79,
+    once: true,
+    steps: [
+      say("楼下有门廊。"),
+      say("雨打在雨棚上，声音很大。"),
+      say("里面是暖的。"),
+    ],
+    cues: [
+      { atChar: 0, directive: { kind: "scene", scene: "hotel_entrance" } },
+      { atChar: 0, directive: { kind: "emotion", emotion: "warm" } },
+      { atChar: 6, directive: { kind: "pose", pose: "stand" } },
+      { atChar: 13, directive: { kind: "camera", move: "push_in" } },
+      { atChar: 19, directive: { kind: "action", action: "nod" } },
+      { atChar: 25, directive: { kind: "action", action: "look_back" } },
     ],
   },
 

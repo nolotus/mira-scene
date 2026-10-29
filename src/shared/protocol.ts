@@ -66,7 +66,13 @@ export type Vfx =
  * 服务端的场景白名单（src/server/scene/validate.ts）**故意不放行它**：
  * 那是枚举合法性层，这里多一个 id 不会让模型凭空切到没有渲染器的场景。
  */
-export type SceneVariant = "cafe_night" | "cafe_closing" | "window_rain" | "seaside_dawn";
+export type SceneVariant =
+  | "cafe_night"
+  | "cafe_closing"
+  | "window_rain"
+  | "seaside_dawn"
+  | "street_night"
+  | "hotel_entrance";
 
 /** 剧情分支选项（可选，非必须项） */
 export interface Branch {
