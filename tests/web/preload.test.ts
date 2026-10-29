@@ -24,13 +24,10 @@ beforeEach(() => {
 });
 
 describe("清单", () => {
-  test("portrait 最先、clip 最后，变体夹在中间", () => {
+  test("清单只剩片段：照片素材已下线，不能再出现 /char/ 项", () => {
     const assets = prefetchAssets();
-    expect(assets[0]).toEqual({ name: "portrait", url: "/char/portrait.png" });
-    expect(assets.some((a) => a.name === "eyes_open")).toBe(true);
-    expect(assets.some((a) => a.name === "mouth_open")).toBe(true);
-    expect(assets[assets.length - 1]).toEqual({ name: "clip", url: CLIP_ASSET });
-    expect(new Set(assets.map((a) => a.name)).size).toBe(assets.length);
+    expect(assets).toEqual([{ name: "clip", url: CLIP_ASSET }]);
+    expect(assets.some((a) => a.url.startsWith("/char/"))).toBe(false);
   });
 });
 
@@ -123,6 +120,11 @@ describe("失败即降级", () => {
       connection: {},
       now: () => 0,
       idle: (cb) => cb(),
+      // 真实清单只有片段 1 项；这里注入两项，才测得出「一张失败不影响其余」的串行语义
+      assets: [
+        { name: "portrait", url: "/char/portrait.png" },
+        { name: "clip", url: CLIP_ASSET },
+      ],
       loader: async (url) => {
         if (url.includes("portrait.png")) throw new Error("HTTP 404");
       },

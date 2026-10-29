@@ -14,8 +14,6 @@ import type { CSSProperties } from "react";
 import type { StageProps } from "../../shared/protocol";
 import { describePresence, type Presence } from "../state/presence";
 import { Character } from "./Character";
-import { PhotoCharacter } from "./characters/PhotoCharacter";
-import { parseCharFlag } from "./characters/portraitRuntime";
 import { prefetchLine, prefetchSnapshot, startPrefetchAfterLoad, subscribePrefetch } from "./preload";
 import { ClipPlayer } from "./clip/ClipPlayer";
 // 显式扩展名：本目录同时存在 cues.ts（数据层）与 Cues.tsx（渲染层），
@@ -59,15 +57,6 @@ export function Stage({
   const beat = useTrigger(state.lastBeat ?? "");
   const action = useTrigger(state.pendingActions.join(" "));
 
-  /**
-   * `?char=photo` 才启用照片级角色；不写这个参数走的就是原来那条 SVG 路径
-   * （三场景像素验收依赖这一点：默认分支多渲染一个字节都不允许）。
-   */
-  const charMode = useMemo(
-    () => parseCharFlag(typeof window === "undefined" ? "" : window.location.search).mode,
-    [],
-  );
-
   const tone = state.lastBeat ? toneOf(state.lastBeat) : 0;
   const hasSubtitle = state.subtitle.trim().length > 0;
 
@@ -102,15 +91,7 @@ export function Stage({
           style={vars(sceneVars(specOf(state.scene)))}
         >
           <StageBackdrop scene={state.scene} />
-          {charMode === "photo" ? (
-            <PhotoCharacter
-              state={state}
-              actionNonce={action.n}
-              mouthDrive={presence?.mouthDrive}
-            />
-          ) : (
-            <Character state={state} actionNonce={action.n} mouthDrive={presence?.mouthDrive} />
-          )}
+          <Character state={state} actionNonce={action.n} mouthDrive={presence?.mouthDrive} />
           {/* 由对话触发的显著视觉事件：每次 lastBeat 变化重播一次 */}
           <div className="stage-beat" key={`beat-${beat.n}`} data-tone={tone} aria-hidden="true">
             <span className="beat-sweep" />

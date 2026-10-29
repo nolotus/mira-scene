@@ -95,7 +95,7 @@ function Row({
 /**
  * 截图 / 自查用的 URL 定点（仅 dev harness 使用）：
  *   /preview.html?nopanel&scene=cafe_closing&pose=hold_cup&emotion=warm
- *   /preview.html?nopanel&char=photo&status=speaking&subtitle=雨好像不打算停了
+ *   /preview.html?nopanel&status=speaking&subtitle=雨好像不打算停了
  * 缺省值逐字段等于 INITIAL，所以不带参数时渲染结果与之前完全一致。
  *
  * `status` / `subtitle` 是给照片角色验收加的：口型由字幕驱动，

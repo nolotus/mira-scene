@@ -14,7 +14,7 @@
 | ② | 文字 + 麦克风互动，语音回复 + 同步字幕，多轮 | **做完** | STT：阿里百炼 `qwen-audio-3.0-asr-flash-streaming` **真流式**（服务端 WS 代理：浏览器送 MediaRecorder 的 webm/opus 分块 → 服务端 ffmpeg 边收边转边喂上游，说话过程中 interim 持续增长；首字约 540ms、定稿 +230ms）；没配百炼 key 时回退 Deepgram `nova-2`(zh)（实测 `1×speech_started + 3×interim + 1×final`，final 滞后约 1.1s）；模型可运行时切换（见「ASR 模型运行时热切换」）。TTS：中文 Edge `zh-CN-XiaoxiaoNeural`（round-trip 置信度 1.00）、英文 Deepgram Aura、浏览器系统音兜底。**中文 TTS 延迟实测**：CLI 路径 1711ms → 原生 WS 热连接 **287ms**（冷启动首次握手 1192ms） | — |
 | ③ | 语音打断五条后果 + 迟到响应不重播 | **做完（机制层）** | 五步链路 + `epoch+turnId` 双闸门（真服务端连打断 10 次 0 失效）+ TTS 代际令牌 + 「丢弃迟到事件 N」可见。**根因修复**：WS 握手期间丢音频 → pre-roll 有界队列（1.5s，超限丢最旧并计数）。**单一触发源**：`deepgram/energy/none` 三态，源不匹配不进闸门。**fire 时重新校验** `speaking`/`source`（arm 成立≠fire 成立）。**真浏览器实测**：`speech_started → 音频停止 200.2ms`。 | **真机待验**：AEC 未上报时按保守策略 `source=none`（自动语音打断关闭，只剩 Esc/按钮）；真人外放是否自打断只有真机可定 |
 | ④ | 结构化指令驱动画面（3 情绪 / 2 动作 / 1 场景变化 / 1 内容触发事件） | **做完** | 7 类 Directive；`CUE_TEMPLATES` 四套时序（storm 1800ms 四层）；输入「外面还在下雨吗」→ `shiver/lightning/rain_heavy/camera.shake/glance_window`；闪电只在 storm（结构性测试锁死）；**指令已锚定字符位置**（`atChar`，服务端按字符边界投递，老客户端退化为立即执行） | 水位排队**已接线**（`src/web/state/session.ts:501` `isCueDue` 闸门；`src/web/state/store.ts:1033` 入队 / `:1094` `text.delta` 后按 atChar 放队首 / `:1056`、`:1128` 水位推进），剩真机复验 |
-| ⑤ | ≥1 种多模态 + 加载/结束/中断/失败 | **做完** | 真媒体片段：12 帧 spritesheet 145KB（程序化生成 + 自写调色板量化），四态真进分支，`?demo=media` 演示 404 降级；照片级角色 `?char=photo`（素材 + 变体 + 微动） | 照片版"贴上去"感（接触阴影/边缘色匹配） |
+| ⑤ | ≥1 种多模态 + 加载/结束/中断/失败 | **做完** | 真媒体片段：12 帧 spritesheet 145KB（程序化生成 + 自写调色板量化），四态真进分支，`?demo=media` 演示 404 降级。照片级角色（`?char=photo`）2026-10-29 整条删除：写实人像 + 程序化嘴眼贴片掉进恐怖谷，调色/羽化救不回来；角色只保留 SVG 分层版 | — |
 | ⑥ | 闭环 + 超时断线失败反馈 + 连打断不播失效 + 无密钥可看核心流程 | **做完** | 9 类故障分支（`?demo=fail\|timeout\|tts\|media` 可注入）；Mock 零密钥跑通全部流程；缓存/配额/诊断齐全 | — |
 
 ## 二、交付物 6 项
@@ -45,9 +45,9 @@
 
 | 项 | 状态 | 证据 / 成本 | ROI |
 |---|---|---|---|
-| 口型同步 | **做完** | SVG 4 相位（`TALK_SEQ`：闭合/半开/圆/扁，由字幕字数驱动、非固定循环，`src/web/stage/Character.tsx:130`）；照片版按 ~80ms 说话时钟算口型（`src/web/stage/characters/PhotoCharacter.tsx:88`），快语速退化两态 | — |
+| 口型同步 | **做完** | SVG 4 相位（`TALK_SEQ`：闭合/半开/圆/扁，由字幕字数驱动、非固定循环，`src/web/stage/Character.tsx:130`）（照片版已下线） | — |
 | 眨眼/呼吸/视线/待机 | **做完** | 眨眼 1.8–7s 随机 + 偶发双眨（`src/web/stage/Character.tsx:9`）；呼吸周期与幅度按状态 + 情绪给（`STATUS_SPEC` / `EMO_RIG`）；倾听态额外前倾 4.5px、待机/思考位移在 `visuals.ts` | — |
-| 情绪平滑过渡 | **做完** | 7 情绪各自一套眼形/眉形/嘴形样式集；照片版部件按 `opacity` 90ms 交叉淡入（`src/web/stage/characters/photo.css:169`） | — |
+| 情绪平滑过渡 | **做完** | 7 情绪各自一套眼形/眉形/嘴形样式集 | — |
 | 动作优先级、中断、自然衔接 | **做完** | `src/web/state/session.ts:57` `startle 6 > shiver 5 > hair_tuck 4 > look_back 3 > sigh 2 > nod 1 > blink 0`；前景队列上限 `ACTION_QUEUE_LIMIT` 3、超限丢「最旧的低优先级」；`blink` 不占队列（`isBackgroundAction`） | — |
 | 音频驱动的角色动作 | **未做** | `AnalyserNode` 全仓只在 VAD 里用（`src/web/voice/vad.ts:448` 唯一一处 `createAnalyser`），未接到角色动作 | 低 |
 | 配置驱动的角色资源系统 | **故意未做** | 会变成通用动画框架，对本题是纯成本 | 不做 |
@@ -93,7 +93,6 @@
 3. 可选·视频演出：片段/定妆照预加载
 4. 可选·工程：结构化事件日志 + `?replay=1` 回放（**回放未做**；`?obs=1` 观测页**已完成**，见上表）
 5. 可选·角色表演：动作优先级队列
-6. 照片版观感修正（接触阴影/边缘色匹配/中性闭唇定妆照）
 7. 收口：全量三项 → 部署 → 独立 review → 录屏（需人工）
 
 ---

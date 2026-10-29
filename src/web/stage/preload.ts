@@ -12,7 +12,6 @@
  * 诊断面板与截图脚本读同一份快照 —— 不靠 console 里翻。
  */
 
-import { MOUTH_VARIANTS, EYE_VARIANTS, PORTRAIT_BASE_FILE, PORTRAIT_DIR, variantFile } from "./characters/portraitSpec";
 
 /** 片段素材（spritesheet 是第一次暴雨演出卡顿的主要来源） */
 export const CLIP_ASSET = "/clip/storm-strip.png";
@@ -47,15 +46,15 @@ export interface PrefetchSnapshot {
 /** 等待窗口：load 之后再留 300ms，给首屏渲染与字体让路 */
 export const PREFETCH_DELAY_MS = 300;
 
-/** 预取清单：定妆照 + 现有变体 + 片段。顺序即优先级（大的先来，早开始早结束） */
+/**
+ * 预取清单：只剩片段。
+ *
+ * 照片级角色（`?char=photo`、定妆照 + 6 张眼/嘴贴片）已于 2026-10-29 整条删掉：
+ * 写实人像 + 程序化嘴眼贴片掉进恐怖谷，观感问题不是调色/羽化能救的。
+ * 现在角色只有 SVG 分层版，没有位图可预取。
+ */
 export function prefetchAssets(): Array<{ name: string; url: string }> {
-  const portrait = `${PORTRAIT_DIR.replace(/\/$/, "")}/${PORTRAIT_BASE_FILE}`;
-  const variants = [...EYE_VARIANTS.map((v) => variantFile("eyes", v)), ...MOUTH_VARIANTS.map((v) => variantFile("mouth", v))];
-  return [
-    { name: "portrait", url: portrait },
-    ...variants.map((file) => ({ name: file.replace(/\.png$/, ""), url: `${PORTRAIT_DIR.replace(/\/$/, "")}/${file}` })),
-    { name: "clip", url: CLIP_ASSET },
-  ];
+  return [{ name: "clip", url: CLIP_ASSET }];
 }
 
 /**
@@ -99,6 +98,12 @@ export interface PrefetchDeps {
   idle?: (cb: () => void) => void;
   connection?: { saveData?: boolean; effectiveType?: string } | null;
   loader?: Loader;
+  /**
+   * 清单覆盖（测试用）：默认 `prefetchAssets()`。
+   * 为什么留这个口子：真实清单现在只有 1 项（照片素材删了），
+   * 而「一张失败不影响其余」这种串行语义必须用 ≥2 项才测得出来。
+   */
+  assets?: ReadonlyArray<{ name: string; url: string }>;
 }
 
 let snapshot: PrefetchSnapshot = { skipped: false, skipReason: null, scheduledAt: null, startedVia: null, entries: [] };
@@ -172,7 +177,7 @@ export function startPrefetch(deps: PrefetchDeps = {}): void {
   const connection =
     deps.connection ?? (typeof navigator !== "undefined" ? (navigator as unknown as { connection?: { saveData?: boolean; effectiveType?: string } }).connection ?? null : null);
   const skipReason = shouldSkipPrefetch(connection);
-  const assets = prefetchAssets();
+  const assets = deps.assets ?? prefetchAssets();
   const entries: PrefetchEntry[] = assets.map((a) => ({ name: a.name, url: a.url, state: "pending", startedAt: 0, doneAt: null, reason: null }));
 
   if (skipReason) {

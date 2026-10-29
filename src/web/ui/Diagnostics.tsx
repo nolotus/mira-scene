@@ -11,7 +11,6 @@
 import type { SessionView } from "../state/store";
 import { latestClipDiagnostic, useClipDiagnostics } from "../stage/clip/clipBus";
 import { clipPhaseLabel } from "../stage/clip/clipState";
-import { usePortraitDiag } from "../stage/characters/portraitRuntime";
 import { useIllustrationRecords, useIllustrationState } from "../stage/illustration/illustrationRuntime";
 import { illustrationPhaseLabel } from "../stage/illustration/illustrationState";
 import { useVoiceChannel } from "../voice/voiceDiag";
@@ -53,19 +52,10 @@ export function Diagnostics(props: DiagnosticsProps) {
   const illustrationRecords = useIllustrationRecords();
   const illustrationLatest = illustrationRecords.length > 0 ? illustrationRecords[illustrationRecords.length - 1]! : null;
   const illustrationFailed = illustrationLatest?.tone === "error";
-  // 照片角色：只留一行（照片不可用一律静默回退 SVG，不在界面上弹错）
-  const portrait = usePortraitDiag();
-  const portraitValue = !portrait
-    ? "SVG（默认）"
-    : portrait.mode === "photo"
-      ? "照片（/char）"
-      : `SVG（回退：${portrait.reason ?? "未启用"}）`;
+  // 角色渲染只有 SVG 一条路（照片版 2026-10-29 整条删除），这行如实写死
+  const portraitValue = "SVG";
   const rows: Array<[string, string, string?]> = [
-    [
-      "角色渲染",
-      portraitValue,
-      portrait ? portrait.detail : "默认走既有 SVG；?char=photo 启用照片级角色（素材缺失自动回退）",
-    ],
+    ["角色渲染", portraitValue, "SVG 分层版（照片级角色已下线）"],
     [
       "首字延迟",
       view.latency?.firstEventMs != null ? fmtMs(view.latency.firstEventMs) : view.busy ? "等待首字…" : "—",

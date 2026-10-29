@@ -80,7 +80,6 @@ URL 开关（可以组合）：
 | `?aec=on\|off\|unknown` | 强制麦克风的 AEC 实测值（只与 `?stt=fake` 一起用） |
 | `?bargeIn=off` | 关掉自动语音打断（只留 Esc / 按钮） |
 | `?director=live` | 这一会话走真模型（要服务端配了 LLM key，按 token 计费） |
-| `?char=photo` | 照片级角色（默认 SVG 骨架版） |
 
 **验证语音打断（不花钱）**：
 
