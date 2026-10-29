@@ -8,6 +8,7 @@
  * 升级前的门禁（没配 key）与桥的建立仍然在 app.ts / stt.ts 里，这里只做三件事：
  * 门禁 → upgrade → 把 ServerWebSocket 和 SttBridge 绑在一起（close 时拆开）。
  */
+import { hasGateCookie } from "./gate.ts";
 import { createApp, sttUpgradeGate } from "./app.ts";
 import { loadConfig } from "./config.ts";
 import { directorModeOf } from "./director/index.ts";
@@ -59,6 +60,13 @@ try {
     fetch(request, srv) {
       const url = new URL(request.url);
       if (url.pathname === "/api/stt") {
+        // 访问口令：WS 升级也要过同一道门（浏览器升级时会自动带同源 cookie）
+        if (config.gatePassword && !hasGateCookie(request, config.gatePassword)) {
+          return new Response(JSON.stringify({ error: "locked", reason: "gate" }), {
+            status: 401,
+            headers: { "content-type": "application/json; charset=utf-8" },
+          });
+        }
         // 语音识别一个 provider 都没配（Deepgram 与百炼都没 key）：**明确 503 + reason**，
         // 不是静默失败也不是 101 之后的空连接
         const gate = sttUpgradeGate(app.voice);

@@ -23,6 +23,7 @@ import { loadConfig, type ServerConfig } from "./config.ts";
 import { createDirector } from "./director/index.ts";
 import { resolveDirectorMode, type DirectorAvailability, type DirectorResolution } from "./director/resolve.ts";
 import { createIllustrationService, type IllustrationService } from "./illustrate.ts";
+import { GATE_PATH, gateAttemptKey, gatePage, gateSuccess, gateTooManyAttempts, hasGateCookie, safeEqual } from "./gate.ts";
 import { isEmotion, isPose, isSceneVariant, validateDirective } from "./scene/validate.ts";
 import { SessionStore, TurnRegistry } from "./sessions.ts";
 import {
@@ -315,6 +316,32 @@ export function createApp(options: AppOptions = {}): App {
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsFor(origin) });
+    }
+
+    // ── 访问口令（应用层 gate；只有配了 GATE_PASSWORD 才生效）──
+    // 为什么不用 Caddy basic auth：它会破坏 WS 升级握手（实测经反代带 auth 时 /api/stt 400，
+    // 直连 101），麦克风就废了。cookie 在 WS 升级时会被浏览器自动带上，三处一道门。
+    const gatePassword = config.gatePassword;
+    if (gatePassword) {
+      const secure = url.protocol === "https:" || request.headers.get("x-forwarded-proto") === "https";
+      if (path === GATE_PATH) {
+        if (request.method === "GET") return gatePage({ secure });
+        const form = await request.formData().catch(() => null);
+        const submitted = typeof form?.get("password") === "string" ? String(form.get("password")) : "";
+        if (gateTooManyAttempts(gateAttemptKey(request))) {
+          return new Response("尝试过于频繁，请 5 分钟后再试。", {
+            status: 429,
+            headers: { "content-type": "text/plain; charset=utf-8" },
+          });
+        }
+        if (!safeEqual(submitted, gatePassword)) return gatePage({ error: "口令不对，再试一次。", secure });
+        return gateSuccess(gatePassword, secure);
+      }
+      const open = path === "/api/health";
+      if (!open && !hasGateCookie(request, gatePassword)) {
+        if (path.startsWith("/api/")) return json({ error: "locked", reason: "gate" }, 401, origin);
+        return gatePage({ secure });
+      }
     }
 
     // 运行时 ASR 切换后台（/admin 页面 + /api/stt/admin/config）。

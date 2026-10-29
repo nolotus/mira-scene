@@ -162,6 +162,8 @@ export interface ServerConfig {
    * token 只在内存里比对，不进日志、不进响应体。
    */
   adminToken: string | null;
+  /** 访问口令：配了就启用应用层 gate（HTML/API/WS 三处共用），不配则站点公开 */
+  gatePassword: string | null;
 }
 
 export const DEFAULT_PORT = 8787;
@@ -287,5 +289,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     llmMode: resolveLlmMode(env),
     devOrigins: ["http://localhost:5173", "http://127.0.0.1:5173"],
     adminToken: trimToNull(env.ADMIN_TOKEN),
+    gatePassword: trimToNull(env.GATE_PASSWORD),
   };
 }
