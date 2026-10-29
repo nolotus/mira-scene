@@ -1,3 +1,4 @@
+import { samplePlayback, type PlaybackSample } from "./playback";
 /**
  * 语音输出（TTS）。
  *
@@ -26,11 +27,15 @@ export interface AudioChunk {
   mime: string;
   /** 这一段音频属于哪一轮（只给观测用，播放逻辑不依赖它） */
   turnId?: string;
+  /** Local playback metadata, not part of the director wire contract. */
+  text?: string;
 }
 
 export interface TTSProvider {
   readonly name: string;
   readonly isSpeaking: boolean;
+  readonly playback?: PlaybackSample | null;
+  readonly synchronized?: boolean;
   /** 增量文本（字幕 delta）：内部按句切分后入队 */
   speak(text: string): void;
   /** 把句末残句立刻读出来（turn.end 时调用） */
@@ -153,6 +158,9 @@ export function isBrowserTtsSupported(): boolean {
  *  避免整条语音链路卡死。
  */
 export class BrowserTTS implements TTSProvider {
+  private playbackValue: PlaybackSample | null = null;
+  private playbackSentence = 0;
+  get playback(): PlaybackSample | null { return this.playbackValue; }
   readonly name = "browser-speech-synthesis";
 
   private readonly lang: string;
@@ -221,6 +229,7 @@ export class BrowserTTS implements TTSProvider {
 
   /** 立即静音。generation+1 之后，旧 utterance 的任何回调都不再生效。 */
   cancel(): void {
+    this.playbackValue = null;
     this.generation += 1;
     this.queue = [];
     this.buffer = "";
@@ -261,9 +270,20 @@ export class BrowserTTS implements TTSProvider {
     const voice = this.pickVoice();
     if (voice) utterance.voice = voice;
 
+    const sentence = ++this.playbackSentence;
+    utterance.onstart = () => {
+      if (generation !== this.generation) return;
+      this.playbackValue = samplePlayback(next, 0, Array.from(next).length, sentence);
+    };
+    utterance.onboundary = (event) => {
+      if (generation !== this.generation) return;
+      const index = Array.from(next.slice(0, event.charIndex)).length;
+      this.playbackValue = samplePlayback(next, index, Array.from(next).length, sentence);
+    };
     const finish = () => {
       // ← 代际令牌：被打断之后补发的老回调在这里被丢弃
       if (generation !== this.generation) return;
+      this.playbackValue = samplePlayback(next, 1, 1, sentence);
       this.clearStallWatchdog();
       this.speakingNow = false;
       this.currentText = "";
@@ -421,7 +441,19 @@ export class StreamTTS implements TTSProvider, AudioChunkSink {
   private ctx: AudioContext | null = null;
   private generation = 0;
   /** 待播队列：buffer 带上它自己那一轮的 id（不能共用一个「当前轮」字段，跨轮会串） */
-  private queue: Array<{ buffer: AudioBuffer; turnId?: string }> = [];
+  private queue: Array<{ buffer: AudioBuffer; turnId?: string; text?: string }> = [];
+  private timelines: Array<{ text: string; start: number; duration: number; sentence: number }> = [];
+  private sentence = 0;
+  get playback(): PlaybackSample | null {
+    const ctx = this.ctx;
+    if (!ctx || this.timelines.length === 0) return this.fallback?.playback ?? null;
+    // getOutputTimestamp maps rendering time to the hardware output clock when supported.
+    const output = ctx.getOutputTimestamp?.();
+    const now = (output?.contextTime ?? 0) > 0 ? output!.contextTime! : ctx.currentTime;
+    while (this.timelines.length > 1 && now >= this.timelines[1]!.start) this.timelines.shift();
+    const item = this.timelines[0]!;
+    return samplePlayback(item.text, now - item.start, item.duration, item.sentence);
+  }
   private sources = new Set<AudioBufferSourceNode>();
   private chain: Promise<void> = Promise.resolve();
   private nextStartAt = 0;
@@ -497,7 +529,7 @@ export class StreamTTS implements TTSProvider, AudioChunkSink {
         const ctx = this.ensureContext();
         const buffer = await ctx.decodeAudioData(raw.slice(0));
         if (generation !== this.generation) return; // 解码期间被打断
-        this.queue.push({ buffer, turnId: chunk.turnId });
+        this.queue.push({ buffer, turnId: chunk.turnId, text: chunk.text });
         this.drainQueue();
       })
       .catch((err: unknown) => {
@@ -510,6 +542,7 @@ export class StreamTTS implements TTSProvider, AudioChunkSink {
   }
 
   cancel(): void {
+    this.timelines = [];
     this.generation += 1;
     this.queue = [];
     this.pending = 0;
@@ -563,7 +596,7 @@ export class StreamTTS implements TTSProvider, AudioChunkSink {
     if (!ctx) return;
     let item = this.queue.shift();
     while (item) {
-      const { buffer, turnId } = item;
+      const { buffer, turnId, text } = item;
       const source = ctx.createBufferSource();
       source.buffer = buffer;
       const gain = ctx.createGain();
@@ -586,6 +619,7 @@ export class StreamTTS implements TTSProvider, AudioChunkSink {
       };
       try {
         source.start(startAt);
+        if (text !== undefined) this.timelines.push({ text, start: startAt, duration: buffer.duration, sentence: ++this.sentence });
         // 「真正听到」的时刻：分片交付（turn:first-audio）之后还要 base64 解码 +
         // decodeAudioData + AudioContext 排期，这段几十到几百 ms 才是用户感知的部分。
         obsFirst("turn:first-sound", turnId);
@@ -797,6 +831,8 @@ export function createSpeakRequest(fetcher: typeof fetch = fetch): SpeakRequest 
 }
 
 export interface RoutedTtsOptions {
+  /** Decode complete sentences so their exact audio duration is known before revealing text. */
+  synchronized?: boolean;
   lang?: string;
   onSegment?: (text: string) => void;
   /** 每个分句现查一次：status 可能比第一句话更晚到 */
@@ -875,6 +911,8 @@ interface JobState {
  * 两条路都遵守同一条铁律：`cancel()` 之后，迟到的 fetch / 迟到的解码一律不许出声（代际令牌）。
  */
 export class RoutedTTS implements TTSProvider {
+  readonly synchronized: boolean;
+  get playback(): PlaybackSample | null { return this.stream?.playback ?? this.browser?.playback ?? null; }
   private browser: BrowserTTS | null = null;
   private stream: StreamTTS | null = null;
   private buffer = "";
@@ -908,6 +946,7 @@ export class RoutedTTS implements TTSProvider {
   private readonly onSynthIssue: ((reason: string) => void) | null;
 
   constructor(options: RoutedTtsOptions = {}) {
+    this.synchronized = options.synchronized ?? false;
     this.lang = options.lang ?? "zh-CN";
     this.onSegment = options.onSegment ?? null;
     this.getStatus = options.getStatus ?? (() => null);
@@ -1229,6 +1268,14 @@ export class RoutedTTS implements TTSProvider {
         this.synthHead += 1;
         continue;
       }
+      if (this.synchronized && !state.done) return;
+      if (this.synchronized && state.chunks.length > 0) {
+        const parts = state.chunks.map(base64ToArrayBuffer);
+        const joined = new Uint8Array(parts.reduce((n, part) => n + part.byteLength, 0));
+        let offset = 0;
+        for (const part of parts) { joined.set(new Uint8Array(part), offset); offset += part.byteLength; }
+        state.chunks = [bytesToBase64(joined)];
+      }
       while (state.chunks.length > 0) {
         const dataUrl = state.chunks.shift();
         if (!dataUrl) break;
@@ -1245,6 +1292,7 @@ export class RoutedTTS implements TTSProvider {
           dataUrl,
           mime: "audio/mpeg",
           turnId: state.job.turnId,
+          text: state.job.text,
         });
       }
       if (!state.done) return;

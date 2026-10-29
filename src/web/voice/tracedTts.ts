@@ -21,6 +21,8 @@ export function withAudioTrace<T extends TTSProvider>(tts: T): T {
     get name(): string {
       return tts.name;
     },
+    get playback() { return tts.playback; },
+    get synchronized() { return tts.synchronized; },
     get isSpeaking(): boolean {
       return tts.isSpeaking;
     },
