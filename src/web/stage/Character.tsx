@@ -276,6 +276,15 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                     <stop offset="0.78" stopColor="#b06c26" />
                     <stop offset="1" stopColor="#7d4615" />
                   </linearGradient>
+                  {/* 袖子出画渐隐：袖口不再是「平口截断」（那读作断肢），
+                      而是从 y≈468 起逐渐透明，读作小臂继续往画面外延伸 */}
+                  <linearGradient id="mx-arm-fade" gradientUnits="userSpaceOnUse" x1="200" y1="468" x2="200" y2="566">
+                    <stop offset="0" stopColor="#ffffff" />
+                    <stop offset="1" stopColor="#000000" />
+                  </linearGradient>
+                  <mask id="mx-arm-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="400" height="560">
+                    <rect x="0" y="0" width="400" height="560" fill="url(#mx-arm-fade)" />
+                  </mask>
                   <linearGradient id="mx-coat-dark" x1="0" y1="0" x2="0.4" y2="1">
                     <stop offset="0" stopColor="#a35f20" />
                     <stop offset="1" stopColor="#6d3b12" />
@@ -349,7 +358,7 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                     />
                   </radialGradient>
                   <clipPath id="mx-face-clip">
-                    <path d="M200,102 C247,102 275,138 276,190 C277,214 273,232 265,250 C254,272 236,286 219,293 C213,295 206,297 200,297 C194,297 187,295 181,293 C164,286 146,272 135,250 C127,232 123,214 124,190 C125,138 153,102 200,102 Z" />
+                    <path d="M200,102 C247,102 275,138 276,190 C277,214 273,232 261,250 C250,272 231,286 214,293 C208,295.5 203,298 200,298 C197,298 192,295.5 186,293 C169,286 150,272 139,250 C127,232 123,214 124,190 C125,138 153,102 200,102 Z" />
                   </clipPath>
                   {/* 每种情绪、每只眼一套「眼睑开口」裁剪：情绪在静态单帧上就有不同眼形 */}
                   {EMOTION_ORDER.map((e) =>
@@ -364,59 +373,87 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                 {/* 1. 后发（跟头部旋转，被雨衣压住下摆） */}
                 <g className="char-head char-head-back">
                   <g className="char-head-act">
-                    <path
-                      className="hair-back"
-                      d="M200,80 C256,80 300,118 302,180 C304,232 292,278 300,322 C306,352 318,370 332,382 C300,394 268,382 250,356 C238,338 234,310 232,286 C226,236 236,196 226,162 C219,138 212,120 200,120 C188,120 181,138 174,162 C164,196 174,236 168,286 C166,310 162,338 150,356 C132,382 100,394 68,382 C82,370 94,352 100,322 C108,278 96,232 98,180 C100,118 144,80 200,80 Z"
-                      fill="url(#mx-hair)"
-                    />
+                    {/* 头整体缩到 0.8×（绕颈根 200,330）：头身比从娃娃脸改成成年女性 */}
+                    <g className="char-head-scale" transform="translate(200,330) scale(0.8) translate(-200,-330)">
+                      <path
+                        className="hair-back"
+                        d="M200,78 C251,78 292,116 294,178 C296,230 286,276 294,320 C300,350 312,368 322,380 C292,392 264,380 246,354 C234,336 230,308 228,284 C222,234 232,194 222,160 C215,136 210,118 200,118 C190,118 185,136 178,160 C168,194 178,234 172,284 C170,308 166,336 154,354 C136,380 108,392 78,380 C92,368 102,350 108,320 C116,276 106,230 108,178 C110,116 149,78 200,78 Z"
+                        fill="url(#mx-hair)"
+                      />
+                    </g>
                   </g>
                 </g>
 
                 {/* 2. 躯干骨架 */}
                 <g className="char-torso">
                   {/* 雨衣后领 / 兜帽堆叠 */}
-                  <ellipse cx="200" cy="330" rx="92" ry="30" fill="url(#mx-hood)" opacity="0.85" />
+                  <ellipse cx="200" cy="336" rx="72" ry="24" fill="url(#mx-hood)" opacity="0.85" />
 
                   <g className="char-shoulders">
                     {/* 3. 脖子（独立组：前倾时颈前伸、微旋） */}
                     <g className="char-neck">
                       <path
-                        d="M174,258 L174,316 C174,330 186,340 200,340 C214,340 226,330 226,316 L226,258 Z"
+                        d="M180,268 L180,326 C180,340 189,349 200,349 C211,349 220,340 220,326 L220,268 Z"
                         fill="url(#mx-skin-neck)"
                       />
-                      <ellipse cx="200" cy="292" rx="26" ry="16" fill="#b07f66" opacity="0.45" />
+                      <ellipse cx="200" cy="308" rx="20" ry="12" fill="#b07f66" opacity="0.45" />
                     </g>
 
                     {/* 4. 雨衣上身（琥珀色，湿润高光） */}
                     <path
                       className="coat"
-                      d="M200,318 C176,318 152,330 134,350 C110,376 96,440 88,486 C130,510 270,510 312,486 C304,440 290,376 266,350 C248,330 224,318 200,318 Z"
+                      d="M200,326 C186,326 170,331 154,338 C134,346 108,352 92,364 C86,398 96,438 112,470 C150,482 250,482 288,470 C304,438 314,398 308,364 C292,352 266,346 246,338 C230,331 214,326 200,326 Z"
                       fill="url(#mx-coat-us)"
                     />
                     {/* 领口 */}
                     <path
-                      d="M138,316 C148,352 166,374 200,382 C186,362 176,340 172,314 Z M262,316 C252,352 234,374 200,382 C214,362 224,340 228,314 Z"
+                      d="M140,344 C150,368 170,384 200,396 C184,370 176,350 172,332 Z M260,344 C250,368 230,384 200,396 C216,370 224,350 228,332 Z"
                       fill="url(#mx-coat-dark)"
                     />
                     {/* 门襟 + 拉链 */}
-                    <path d="M200,340 L200,470" stroke="#6b3a12" strokeWidth="3" opacity="0.55" />
-                    <rect x="196" y="392" width="9" height="16" rx="3" fill="#f3d9a6" opacity="0.7" />
+                    <path d="M200,352 L200,486" stroke="#6b3a12" strokeWidth="2.6" opacity="0.55" />
+                    <rect x="196.5" y="400" width="8" height="14" rx="3" fill="#f3d9a6" opacity="0.7" />
                     {/* 肩线（压肩时整条线一起下去） */}
-                    <path d="M132,336 C118,368 110,406 106,452" stroke="#7d4615" strokeWidth="3" fill="none" opacity="0.35" />
-                    <path d="M268,336 C282,368 290,406 294,452" stroke="#7d4615" strokeWidth="3" fill="none" opacity="0.35" />
+                    <path d="M93,370 C88,398 94,438 108,466" stroke="#7d4615" strokeWidth="2.6" fill="none" opacity="0.35" />
+                    <path d="M307,370 C312,398 306,438 292,466" stroke="#7d4615" strokeWidth="2.6" fill="none" opacity="0.35" />
                     {/* 肩缝：让「肩」真的看得出来，不是一整块色块 */}
-                    <path d="M172,330 C158,336 145,344 137,354" stroke="#6d3b12" strokeWidth="3.4" fill="none" opacity="0.5" strokeLinecap="round" />
-                    <path d="M228,330 C242,336 255,344 263,354" stroke="#6d3b12" strokeWidth="3.4" fill="none" opacity="0.5" strokeLinecap="round" />
-                    <path d="M137,354 C128,362 121,374 118,386 C130,378 141,366 148,352 Z" fill="#5f3311" opacity="0.2" />
-                    <path d="M263,354 C272,362 279,374 282,386 C270,378 259,366 252,352 Z" fill="#5f3311" opacity="0.2" />
+                    <path d="M176,332 C154,340 124,350 100,362" stroke="#6d3b12" strokeWidth="3" fill="none" opacity="0.5" strokeLinecap="round" />
+                    <path d="M224,332 C246,340 276,350 300,362" stroke="#6d3b12" strokeWidth="3" fill="none" opacity="0.5" strokeLinecap="round" />
+                    <path d="M100,362 C92,372 88,384 88,396 C100,388 108,376 112,360 Z" fill="#5f3311" opacity="0.2" />
+                    <path d="M300,362 C308,372 312,384 312,396 C300,388 292,376 288,360 Z" fill="#5f3311" opacity="0.2" />
                     {/* 湿润高光 + 窗外冷色白边光（上半段） */}
                     <path
-                      d="M200,298 C170,298 146,309 126,326 C110,340 96,364 86,396"
+                      d="M186,330 C160,336 136,346 118,358 C104,368 98,382 95,402"
                       stroke="#ffe3b4"
-                      strokeWidth="5"
+                      strokeWidth="4.5"
                       fill="none"
                       opacity="0.35"
                     />
+                    {/* 雨衣腰带：把腰线读出来（不是圆筒），并挂一枚 D 形扣 */}
+                    <path
+                      d="M102,436 C148,452 252,452 298,436 L299,454 C250,470 150,470 101,454 Z"
+                      fill="#6d3b12"
+                      opacity="0.5"
+                    />
+                    <path
+                      d="M106,442 C150,456 250,456 294,442"
+                      stroke="#a9712c"
+                      strokeWidth="1.6"
+                      fill="none"
+                      opacity="0.5"
+                    />
+                    <rect x="188" y="440" width="24" height="22" rx="5" fill="#f3d9a6" opacity="0.85" />
+                    <rect x="193" y="445" width="14" height="12" rx="3" fill="#b4712a" opacity="0.9" />
+                    <path
+                      d="M214,450 C220,470 218,486 210,498 C205,504 198,502 197,496 C203,484 205,468 204,452 Z"
+                      fill="#6d3b12"
+                      opacity="0.45"
+                    />
+                    {/* 兜帽抽绳：领口不再是一块死板的深色 */}
+                    <path d="M166,342 C162,364 160,382 164,396" stroke="#e8c48a" strokeWidth="2" fill="none" opacity="0.6" strokeLinecap="round" />
+                    <path d="M234,342 C238,364 240,382 236,396" stroke="#e8c48a" strokeWidth="2" fill="none" opacity="0.6" strokeLinecap="round" />
+                    <circle cx="164" cy="399" r="2.6" fill="#e8c48a" opacity="0.8" />
+                    <circle cx="236" cy="399" r="2.6" fill="#e8c48a" opacity="0.8" />
                     {/* 上衣不再散布雨珠：原来的 4+4 个静止淡色椭圆在待机态也一直亮着，
                         没有水流方向、没有形成轨迹，读作「污渍」而不是雨。雨的表达交给
                         窗外的 rain-layer 与演出期的 vfx。 */}
@@ -426,16 +463,19 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                   <g className="char-hem">
                     <path
                       className="coat-hem"
-                      d="M88,486 C76,508 72,536 70,560 L330,560 C328,536 324,508 312,486 C270,510 130,510 88,486 Z"
+                      d="M112,470 C102,494 98,524 98,560 L302,560 C302,524 298,494 288,470 C246,486 154,486 112,470 Z"
                       fill="url(#mx-coat-us)"
                     />
                     <path
-                      d="M274,326 C290,346 302,380 310,420 C316,452 320,486 322,516"
+                      d="M282,332 C296,352 304,384 306,420 C308,450 306,486 302,520"
                       stroke="url(#mx-rim)"
-                      strokeWidth="6"
+                      strokeWidth="5"
                       fill="none"
                       strokeLinecap="round"
                     />
+                    {/* 衣摆的湿褶：让下摆不是一块梯形 */}
+                    <path d="M150,504 C146,522 144,540 146,558" stroke="#7d4615" strokeWidth="2.2" fill="none" opacity="0.3" />
+                    <path d="M246,498 C250,520 252,540 250,558" stroke="#7d4615" strokeWidth="2.2" fill="none" opacity="0.3" />
 
                   </g>
                 </g>
@@ -443,206 +483,228 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                 {/* 6. 侧发（压在雨衣上，不随头旋转） */}
                 <g className="char-sidehair">
                   <path
-                    d="M126,214 C112,262 106,320 114,376 C118,406 130,432 150,450 C142,412 140,366 142,324 C144,288 146,248 150,216 Z"
+                    d="M140.8,237.2 C129.6,275.6 124.8,322 131.2,366.8 C134.4,390.8 144,411.6 160,426 C153.6,395.6 152,358.8 153.6,325.2 C155.2,296.4 156.8,264.4 160,238.8 Z"
                     fill="url(#mx-hair)"
                   />
                   <path
-                    d="M274,214 C288,262 294,320 286,376 C282,406 270,432 250,450 C258,412 260,366 258,324 C256,288 254,248 250,216 Z"
+                    d="M259.2,237.2 C270.4,275.6 275.2,322 268.8,366.8 C265.6,390.8 256,411.6 240,426 C246.4,395.6 248,358.8 246.4,325.2 C244.8,296.4 243.2,264.4 240,238.8 Z"
                     fill="url(#mx-hair)"
                   />
+                  {/* 侧发上的细碎发丝：头发不是一块纯色 */}
+                  <path d="M148,246 C139,292 137,344 144,384" stroke="#5d4231" strokeWidth="2" fill="none" opacity="0.5" strokeLinecap="round" />
+                  <path d="M252,246 C261,292 263,344 256,384" stroke="#5d4231" strokeWidth="2" fill="none" opacity="0.5" strokeLinecap="round" />
                 </g>
 
                 {/* 7. 上臂（独立组，origin 在肩关节）：姿势与动作都会抬肩/转袖 */}
-                <g className="char-arm char-arm-l">
+                <g className="char-arm char-arm-l" mask="url(#mx-arm-mask)">
                   <path
                     className="sleeve"
-                    d="M132,344 C118,376 112,414 110,452 C109,484 112,510 118,530 C124,540 146,540 152,530 C148,506 146,472 148,436 C150,404 154,374 160,350 Z"
+                    d="M96,368 C86,398 80,436 80,472 C80,502 84,524 90,540 C94,550 114,550 118,540 C116,516 115,486 117,452 C119,420 122,392 124,372 Z"
                     fill="url(#mx-sleeve)"
                   />
-                  <path d="M156,352 C150,392 146,440 148,486" stroke="#7d4615" strokeWidth="2.6" fill="none" opacity="0.45" />
-                  {/* 袖口（压到画面下沿之外，读作「小臂还在下面」，不要读成口袋） */}
-                  <path d="M116,536 C122,532 150,532 156,536 L154,558 C148,562 124,562 118,558 Z" fill="url(#mx-coat-dark)" opacity="0.9" />
+                  <path d="M118,378 C112,412 108,456 110,498" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
                 </g>
-                <g className="char-arm char-arm-r">
+                <g className="char-arm char-arm-r" mask="url(#mx-arm-mask)">
                   <path
                     className="sleeve"
-                    d="M268,344 C282,376 288,414 290,452 C291,484 288,510 282,530 C276,540 254,540 248,530 C252,506 254,472 252,436 C250,404 246,374 240,350 Z"
+                    d="M304,368 C314,398 320,436 320,472 C320,502 316,524 310,540 C306,550 286,550 282,540 C284,516 285,486 283,452 C281,420 278,392 276,372 Z"
                     fill="url(#mx-sleeve)"
                   />
-                  <path d="M244,352 C250,392 254,440 252,486" stroke="#7d4615" strokeWidth="2.6" fill="none" opacity="0.45" />
-                  <path d="M284,536 C278,532 250,532 244,536 L246,558 C252,562 276,562 282,558 Z" fill="url(#mx-coat-dark)" opacity="0.9" />
+                  <path d="M282,378 C288,412 292,456 290,498" stroke="#7d4615" strokeWidth="2.4" fill="none" opacity="0.45" />
                 </g>
 
                 {/* 杯子（hold_cup 才出现） */}
                 <g className="mug">
-                  <ellipse cx="200" cy="500" rx="86" ry="34" fill="url(#mx-muglight)" />
-                  <path d="M166,438 L234,438 L228,502 C227,510 220,516 212,516 L188,516 C180,516 173,510 172,502 Z" fill="#f4efe6" />
-                  <path d="M166,438 L234,438 L232,456 L168,456 Z" fill="#e4d9c8" />
-                  <path d="M234,452 C252,452 258,464 256,476 C254,490 244,498 232,498" stroke="#f4efe6" strokeWidth="7" fill="none" strokeLinecap="round" />
-                  <ellipse cx="200" cy="438" rx="34" ry="9" fill="#6b4423" />
-                  <ellipse cx="200" cy="437" rx="26" ry="6" fill="#432815" />
+                  <ellipse cx="200" cy="496" rx="62" ry="26" fill="url(#mx-muglight)" />
+                  <path d="M174,452 L226,452 L221,508 C220,515 214,520 207,520 L193,520 C186,520 180,515 179,508 Z" fill="#f4efe6" />
+                  <path d="M174,452 L226,452 L224,467 L176,467 Z" fill="#e4d9c8" />
+                  <path d="M226,463 C241,463 246,473 244,483 C242,494 233,500 222,500" stroke="#f4efe6" strokeWidth="6" fill="none" strokeLinecap="round" />
+                  <ellipse cx="200" cy="452" rx="26" ry="8" fill="#6b4423" />
+                  <ellipse cx="200" cy="451" rx="19" ry="5" fill="#432815" />
+                  {/* 杯壁反光：杯子不是白色梯形 */}
+                  <path d="M181,472 C180,486 181,498 184,510" stroke="#d8cdbb" strokeWidth="2" fill="none" opacity="0.7" />
                 </g>
 
                 {/* 8. 头部（面部特征整体跟随 --head-rot / --head-unyaw） */}
                 <g className="char-head char-head-front">
                   <g className="char-head-act">
-                    {/* 耳朵 + 倾听时的耳侧高光 */}
-                    <ellipse cx="126" cy="208" rx="11" ry="17" fill="url(#mx-skin)" />
-                    <ellipse cx="274" cy="208" rx="11" ry="17" fill="url(#mx-skin)" />
-                    <ellipse cx="126" cy="208" rx="5" ry="9" fill="#d9a184" opacity="0.6" />
-                    <ellipse cx="274" cy="208" rx="5" ry="9" fill="#d9a184" opacity="0.6" />
-                    <circle className="ear-glow" cx="126" cy="206" r="30" fill="url(#mx-earglow)" />
-                    <circle className="ear-glow ear-glow-r" cx="274" cy="206" r="30" fill="url(#mx-earglow)" />
+                    {/* 头整体缩到 0.8×（绕颈根 200,330）：头身比从娃娃脸改成成年女性 */}
+                    <g className="char-head-scale" transform="translate(200,330) scale(0.8) translate(-200,-330)">
+                      {/* 耳朵 + 倾听时的耳侧高光 */}
+                      <ellipse cx="126" cy="208" rx="11" ry="17" fill="url(#mx-skin)" />
+                      <ellipse cx="274" cy="208" rx="11" ry="17" fill="url(#mx-skin)" />
+                      <ellipse cx="126" cy="208" rx="5" ry="9" fill="#d9a184" opacity="0.6" />
+                      <ellipse cx="274" cy="208" rx="5" ry="9" fill="#d9a184" opacity="0.6" />
+                      <circle className="ear-glow" cx="126" cy="206" r="30" fill="url(#mx-earglow)" />
+                      <circle className="ear-glow ear-glow-r" cx="274" cy="206" r="30" fill="url(#mx-earglow)" />
 
-                    {/* 脸 */}
-                    <path
-                      className="face"
-                      d="M200,102 C247,102 275,138 276,190 C277,214 273,232 265,250 C254,272 236,286 219,293 C213,295 206,297 200,297 C194,297 187,295 181,293 C164,286 146,272 135,250 C127,232 123,214 124,190 C125,138 153,102 200,102 Z"
-                      fill="url(#mx-skin)"
-                    />
+                      {/* 脸 */}
+                      <path
+                        className="face"
+                        d="M200,102 C247,102 275,138 276,190 C277,214 273,232 261,250 C250,272 231,286 214,293 C208,295.5 203,298 200,298 C197,298 192,295.5 186,293 C169,286 150,272 139,250 C127,232 123,214 124,190 C125,138 153,102 200,102 Z"
+                        fill="url(#mx-skin)"
+                      />
 
-                    {/* 侧向阴影（turn_away / glance_window） */}
-                    <g clipPath="url(#mx-face-clip)">
-                      <rect className="face-shade" x="110" y="90" width="180" height="220" fill="url(#mx-shade)" />
-                      <ellipse cx="200" cy="120" rx="96" ry="34" fill="#0a1018" opacity="0.18" />
-                    </g>
+                      {/* 侧向阴影（turn_away / glance_window） */}
+                      <g clipPath="url(#mx-face-clip)">
+                        <rect className="face-shade" x="110" y="90" width="180" height="220" fill="url(#mx-shade)" />
+                        <ellipse cx="200" cy="120" rx="96" ry="34" fill="#0a1018" opacity="0.18" />
+                      </g>
 
-                    {/* 脸颊红晕（强度由情绪给，位置随情绪微移） */}
-                    <g className="cheeks">
-                      <ellipse className="cheek" cx="158" cy="234" rx="27" ry="18" fill="url(#mx-cheek)" />
-                      <ellipse className="cheek" cx="242" cy="234" rx="27" ry="18" fill="url(#mx-cheek)" />
-                    </g>
+                      {/* 脸颊红晕（强度由情绪给，位置随情绪微移） */}
+                      <g className="cheeks">
+                        <ellipse className="cheek" cx="158" cy="234" rx="27" ry="18" fill="url(#mx-cheek)" />
+                        <ellipse className="cheek" cx="242" cy="234" rx="27" ry="18" fill="url(#mx-cheek)" />
+                      </g>
 
-                    {/* 眼：7 种情绪各一套眼睑开口（裁剪），瞳孔大小与朝向单独给 */}
-                    <g className="eyes">
-                      {EMOTION_ORDER.map((e) => (
-                        <g className={`eye-set eye-set-${e}`} key={e}>
-                          {EYES.map(({ cx, side }) => (
-                            <g className="eye" key={side}>
-                              <g className="eye-shape">
-                                <g className="eye-blink">
-                                  <g clipPath={`url(#mx-eyec-${side}-${e})`}>
-                                    <ellipse cx={cx} cy="198" rx="16.5" ry="11.5" fill="#fbf3ee" />
-                                    <ellipse cx={cx} cy="198" rx="16.5" ry="11.5" fill="#2a1712" opacity="0.12" />
-                                    <g className="gaze">
-                                      <g className="gaze-act">
-                                        <circle cx={cx} cy="199.5" r="8.4" fill="url(#mx-iris)" />
-                                        <circle cx={cx} cy="199.5" r={3.4 * EYE_PUPIL[e]} fill="#150d09" />
-                                        <circle cx={cx - 3} cy="196" r="2.7" fill="#ffffff" opacity="0.92" />
-                                        <circle cx={cx + 3.6} cy="202.8" r="1.2" fill="#ffffff" opacity="0.45" />
+                      {/* 眼：7 种情绪各一套眼睑开口（裁剪），瞳孔大小与朝向单独给 */}
+                      <g className="eyes">
+                        {EMOTION_ORDER.map((e) => (
+                          <g className={`eye-set eye-set-${e}`} key={e}>
+                            {EYES.map(({ cx, side }) => (
+                              <g className="eye" key={side}>
+                                <g className="eye-shape">
+                                  <g className="eye-blink">
+                                    <g clipPath={`url(#mx-eyec-${side}-${e})`}>
+                                      <ellipse cx={cx} cy="198" rx="16.5" ry="12.4" fill="#fbf3ee" />
+                                      <ellipse cx={cx} cy="198" rx="16.5" ry="12.4" fill="#2a1712" opacity="0.12" />
+                                      <g className="gaze">
+                                        <g className="gaze-act">
+                                          <circle cx={cx} cy="199.5" r="9.2" fill="url(#mx-iris)" />
+                                          <circle cx={cx} cy="199.5" r={3.8 * EYE_PUPIL[e]} fill="#150d09" />
+                                          <circle cx={cx - 3} cy="196" r="2.9" fill="#ffffff" opacity="0.92" />
+                                          <circle cx={cx + 3.6} cy="202.8" r="1.3" fill="#ffffff" opacity="0.45" />
+                                        </g>
                                       </g>
                                     </g>
+                                    {/* 眼线不在裁剪里：闭眼时也要有形状 */}
+                                    <path
+                                      d={eyeUpper(cx, EYE_SHAPE[e])}
+                                      stroke="#2c1a12"
+                                      strokeWidth={EYE_SHAPE[e].thick}
+                                      strokeLinecap="round"
+                                      fill="none"
+                                    />
+                                    <path
+                                      d={eyeLower(cx, EYE_SHAPE[e])}
+                                      stroke={EYE_SHAPE[e].tear ? "#8fa7c4" : "#c68a72"}
+                                      strokeWidth={EYE_SHAPE[e].tear ? 2 : 1.4}
+                                      fill="none"
+                                      opacity={EYE_SHAPE[e].tear ? 0.75 : 0.5}
+                                    />
+                                    <path
+                                      d={`M${cx + 14},${192.5 + EYE_SHAPE[e].tilt} L${cx + 20},${188.5 + EYE_SHAPE[e].tilt}`}
+                                      stroke="#2c1a12"
+                                      strokeWidth="2.8"
+                                      strokeLinecap="round"
+                                    />
                                   </g>
-                                  {/* 眼线不在裁剪里：闭眼时也要有形状 */}
-                                  <path
-                                    d={eyeUpper(cx, EYE_SHAPE[e])}
-                                    stroke="#2c1a12"
-                                    strokeWidth={EYE_SHAPE[e].thick}
-                                    strokeLinecap="round"
-                                    fill="none"
-                                  />
-                                  <path
-                                    d={eyeLower(cx, EYE_SHAPE[e])}
-                                    stroke={EYE_SHAPE[e].tear ? "#8fa7c4" : "#c68a72"}
-                                    strokeWidth={EYE_SHAPE[e].tear ? 2 : 1.4}
-                                    fill="none"
-                                    opacity={EYE_SHAPE[e].tear ? 0.75 : 0.5}
-                                  />
-                                  <path
-                                    d={`M${cx + 14},${192.5 + EYE_SHAPE[e].tilt} L${cx + 20},${188.5 + EYE_SHAPE[e].tilt}`}
-                                    stroke="#2c1a12"
-                                    strokeWidth="2.2"
-                                    strokeLinecap="round"
-                                  />
                                 </g>
                               </g>
-                            </g>
-                          ))}
-                        </g>
-                      ))}
-                    </g>
-
-                    {/* 眉毛：7 种情绪各一份 */}
-                    <g className="brows">
-                      {EMOTION_ORDER.map((e) => (
-                        <g className={`brow brow-${e}`} key={e}>
-                          <path d={BROWS[e][0]} />
-                          <path d={BROWS[e][1]} />
-                        </g>
-                      ))}
-                    </g>
-
-                    {/* 鼻子 */}
-                    <path
-                      d="M200,222 C196,232 195,238 199,241 C202,243 206,242 208,239"
-                      stroke="#c58a6d"
-                      strokeWidth="2.2"
-                      fill="none"
-                      strokeLinecap="round"
-                      opacity="0.75"
-                    />
-
-                    {/* 嘴 + 下颌：闭合相位用情绪嘴形，1/2/3 相位是说话口型 */}
-                    <g className="char-jaw">
-                      <g className="mouths">
-                        {EMOTION_ORDER.map((e) => (
-                          <g className={`mouth mouth-${e}`} key={e}>
-                            <path d={MOUTHS[e].path} fill={MOUTHS[e].fill} />
-                            {MOUTHS[e].lip ? <path d={MOUTHS[e].lip} fill="#b5675c" opacity="0.5" /> : null}
+                            ))}
                           </g>
                         ))}
-                        {LIPS.map((l, i) =>
-                          l.path ? (
-                            <g className={`lip lip-${i}`} key={i}>
-                              <path d={l.path} fill={l.fill} />
-                              {l.teeth ? <path d={l.teeth} fill="#fdf3ea" opacity="0.85" /> : null}
-                            </g>
-                          ) : null,
-                        )}
                       </g>
-                    </g>
 
-                    {/* 情绪标记：焦虑的汗滴 / 惊讶的爆点（只在对应情绪出现） */}
-                    <g className="char-marks">
+                      {/* 眉毛：7 种情绪各一份 */}
+                      <g className="brows">
+                        {EMOTION_ORDER.map((e) => (
+                          <g className={`brow brow-${e}`} key={e}>
+                            <path d={BROWS[e][0]} />
+                            <path d={BROWS[e][1]} />
+                          </g>
+                        ))}
+                      </g>
+
+                      {/* 鼻子 */}
                       <path
-                        className="mark mark-sweat"
-                        d="M284,168 C290,178 294,184 294,190 C294,197 289,201 283,201 C277,201 272,197 272,190 C272,184 278,178 284,168 Z"
-                        fill="#bfe3ff"
-                        opacity="0.8"
+                        d="M200,222 C196,232 195,238 199,241 C202,243 206,242 208,239"
+                        stroke="#c58a6d"
+                        strokeWidth="2.8"
+                        fill="none"
+                        strokeLinecap="round"
+                        opacity="0.75"
                       />
-                      <path className="mark mark-spark" d="M300,132 L303,141 L312,144 L303,147 L300,156 L297,147 L288,144 L297,141 Z" fill="#fff2c9" opacity="0.9" />
-                    </g>
 
-                    {/* 刘海 + 湿发丝 */}
-                    <path
-                      d="M112,206 C116,130 148,92 200,92 C252,92 284,130 288,206 C278,172 258,152 230,143 C212,138 198,152 184,163 C168,176 142,190 112,206 Z"
-                      fill="#241811"
-                    />
-                    {/* 发缝补片：后发的内挖空（y≈120–162）与刘海底边（x≈212 处升至 y≈138）之间
-                        曾露出一块额头皮肤，在头顶读成「假发中缝」。这里用与刘海同色的覆盖路径把
-                        缺口填上：上沿钻进刘海内部避免接缝，下沿是一道连续发际线（y≈158–164，
-                        高于眉毛 y≈173 至少 9px，不会压眼）。 */}
-                    <path
-                      className="hair-part-fill"
-                      d="M184,164 C194,150 206,140 216,134 C226,128 238,136 248,146 C256,152 262,156 268,160 C254,158 232,158 210,159 C198,160 188,162 184,164 Z"
-                      fill="#241811"
-                    />
-                    <path d="M236,140 C222,152 214,170 212,188" stroke="#6d4c35" strokeWidth="2.4" fill="none" opacity="0.6" strokeLinecap="round" />
-                    <path d="M168,146 C160,160 156,174 156,186" stroke="#6d4c35" strokeWidth="2" fill="none" opacity="0.45" strokeLinecap="round" />
-                    {/* 前景发绺：别头发时会被拨动。曾用 mx-hair 渐变，在额头上读成一道浅色斜线，改深色 */}
-                    <path className="strand" d="M132,182 C146,174 158,166 170,158 C158,172 144,186 136,198 Z" fill="#2a1c12" opacity="0.92" />
+                      {/* 嘴 + 下颌：闭合相位用情绪嘴形，1/2/3 相位是说话口型 */}
+                      <g className="char-jaw">
+                        <g className="mouths">
+                          {EMOTION_ORDER.map((e) => (
+                            <g className={`mouth mouth-${e}`} key={e}>
+                              <path d={MOUTHS[e].path} fill={MOUTHS[e].fill} />
+                              {MOUTHS[e].lip ? <path d={MOUTHS[e].lip} fill="#b5675c" opacity="0.5" /> : null}
+                            </g>
+                          ))}
+                          {LIPS.map((l, i) =>
+                            l.path ? (
+                              <g className={`lip lip-${i}`} key={i}>
+                                <path d={l.path} fill={l.fill} />
+                                {l.teeth ? <path d={l.teeth} fill="#fdf3ea" opacity="0.85" /> : null}
+                              </g>
+                            ) : null,
+                          )}
+                        </g>
+                      </g>
 
-                    {/* 银色星星发夹 */}
-                    <g className="hairpin" transform="translate(152,158) rotate(-14)">
-                      <g className="pin-act">
+                      {/* 情绪标记：焦虑的汗滴 / 惊讶的爆点（只在对应情绪出现） */}
+                      <g className="char-marks">
                         <path
-                          d="M0,-13 L3.8,-4.6 L12.6,-3.7 L6.2,2.2 L7.9,11 L0,6.4 L-7.9,11 L-6.2,2.2 L-12.6,-3.7 L-3.8,-4.6 Z"
-                          fill="#eaf2fb"
-                          stroke="#b9cde2"
-                          strokeWidth="1"
+                          className="mark mark-sweat"
+                          d="M284,168 C290,178 294,184 294,190 C294,197 289,201 283,201 C277,201 272,197 272,190 C272,184 278,178 284,168 Z"
+                          fill="#bfe3ff"
+                          opacity="0.8"
                         />
-                        <path d="M0,-7 L1.6,-1.8 L6.6,-1.4 L2.7,1.9 L4,6.6 L0,3.8 L-4,6.6 L-2.7,1.9 L-6.6,-1.4 L-1.6,-1.8 Z" fill="#ffffff" opacity="0.85" />
-                        <circle className="pin-spark" cx="9" cy="-11" r="2.6" fill="#ffffff" />
+                        <path className="mark mark-spark" d="M300,132 L303,141 L312,144 L303,147 L300,156 L297,147 L288,144 L297,141 Z" fill="#fff2c9" opacity="0.9" />
+                      </g>
+
+                      {/* 刘海 + 湿发丝 */}
+                      <path
+                        d="M112,206 C116,130 148,92 200,92 C252,92 284,130 288,206 C278,172 258,152 230,143 C212,138 198,152 184,163 C168,176 142,190 112,206 Z"
+                        fill="#241811"
+                      />
+                      {/* 发缝补片：后发的内挖空（y≈120–162）与刘海底边（x≈212 处升至 y≈138）之间
+                          曾露出一块额头皮肤，在头顶读成「假发中缝」。这里用与刘海同色的覆盖路径把
+                          缺口填上：上沿钻进刘海内部避免接缝，下沿是一道连续发际线（y≈158–164，
+                          高于眉毛 y≈173 至少 9px，不会压眼）。 */}
+                      <path
+                        className="hair-part-fill"
+                        d="M184,164 C194,150 206,140 216,134 C226,128 238,136 248,146 C256,152 262,156 268,160 C254,158 232,158 210,159 C198,160 188,162 184,164 Z"
+                        fill="#241811"
+                      />
+                      <path d="M236,140 C222,152 214,170 212,188" stroke="#6d4c35" strokeWidth="2.4" fill="none" opacity="0.6" strokeLinecap="round" />
+                      <path d="M168,146 C160,160 156,174 156,186" stroke="#6d4c35" strokeWidth="2" fill="none" opacity="0.45" strokeLinecap="round" />
+                      {/* 额前碎发：多几缕，刘海才不是一块色板 */}
+                      <path d="M206,116 C197,132 191,150 190,166" stroke="#6d4c35" strokeWidth="1.8" fill="none" opacity="0.38" strokeLinecap="round" />
+                      <path d="M142,138 C134,154 131,170 132,184" stroke="#6d4c35" strokeWidth="1.6" fill="none" opacity="0.3" strokeLinecap="round" />
+                      <path d="M262,132 C268,150 270,168 268,182" stroke="#6d4c35" strokeWidth="1.6" fill="none" opacity="0.3" strokeLinecap="round" />
+                      {/* 湿发的反光带（复用已有的 mx-hair-sheen 渐变） */}
+                      <path
+                        d="M140,116 C162,102 196,98 226,106 C198,120 172,132 152,150 C144,140 140,128 140,116 Z"
+                        fill="url(#mx-hair-sheen)"
+                        opacity="0.5"
+                      />
+                      {/* 前景发绺：别头发时会被拨动。曾用 mx-hair 渐变，在额头上读成一道浅色斜线，改深色 */}
+                      <path className="strand" d="M132,182 C146,174 158,166 170,158 C158,172 144,186 136,198 Z" fill="#2a1c12" opacity="0.92" />
+
+                      {/* 银色星星发夹 */}
+                      <g className="hairpin" transform="translate(152,158) rotate(-14)">
+                        <g className="pin-act">
+                          <path
+                            d="M0,-13 L3.8,-4.6 L12.6,-3.7 L6.2,2.2 L7.9,11 L0,6.4 L-7.9,11 L-6.2,2.2 L-12.6,-3.7 L-3.8,-4.6 Z"
+                            fill="#eaf2fb"
+                            stroke="#b9cde2"
+                            strokeWidth="1"
+                          />
+                          <path d="M0,-7 L1.6,-1.8 L6.6,-1.4 L2.7,1.9 L4,6.6 L0,3.8 L-4,6.6 L-2.7,1.9 L-6.6,-1.4 L-1.6,-1.8 Z" fill="#ffffff" opacity="0.85" />
+                          <circle className="pin-spark" cx="9" cy="-11" r="2.6" fill="#ffffff" />
+                        </g>
+                      </g>
+                      {/* 第二枚小发夹：鬓角一小撮，别在耳后 */}
+                      <g className="hairpin" transform="translate(141,206) rotate(-28)">
+                        <g className="pin-act">
+                          <path d="M0,-7 L2.1,-2.5 L6.9,-2 L3.4,1.2 L4.3,6 L0,3.5 L-4.3,6 L-3.4,1.2 L-6.9,-2 L-2.1,-2.5 Z" fill="#e6eef8" stroke="#a9c0d8" strokeWidth="0.9" />
+                          <circle className="pin-spark" cx="6" cy="-7" r="1.8" fill="#ffffff" />
+                        </g>
                       </g>
                     </g>
                   </g>
@@ -653,23 +715,23 @@ export function Character({ state, actionNonce, mouthDrive = true }: CharacterPr
                   {/* 前臂：后粗前细，斜着向发夹方向伸 */}
                   <path
                     className="reach-arm"
-                    d="M182,348 C168,324 156,298 150,274 C147,262 152,253 160,254 C168,255 172,263 174,272 C178,294 186,320 194,342 Z"
+                    d="M185.6,344.4 C174.4,325.2 164.8,304.4 160,285.2 C157.6,275.6 161.6,268.4 168,269.2 C174.4,270 177.6,276.4 179.2,283.6 C182.4,301.2 188.8,322 195.2,339.6 Z"
                     fill="url(#mx-sleeve)"
                   />
                   {/* 袖口 */}
-                  <path d="M148,274 C154,267 170,267 176,273 L174,283 C168,289 154,289 148,283 Z" fill="url(#mx-coat-dark)" opacity="0.9" />
+                  <path d="M158.4,285.2 C163.2,279.6 176,279.6 180.8,284.4 L179.2,292.4 C174.4,297.2 163.2,297.2 158.4,292.4 Z" fill="url(#mx-coat-dark)" opacity="0.9" />
                   {/* 手掌 + 手指朝发夹 */}
-                  <path className="reach-hand" d="M157,270 C150,260 147,247 151,239 C155,231 163,230 167,238 C169,245 168,254 166,260 Z" fill="url(#mx-skin)" />
-                  <path d="M152,240 C154,232 160,228 165,232" stroke="#c58a6d" strokeWidth="1.8" fill="none" opacity="0.7" />
-                  <path d="M158,237 L163,225" stroke="#f5d6bd" strokeWidth="4.2" strokeLinecap="round" />
-                  <path d="M165,239 L171,228" stroke="#f5d6bd" strokeWidth="4" strokeLinecap="round" />
+                  <path className="reach-hand" d="M165.6,282 C160,274 157.6,263.6 160.8,257.2 C164,250.8 170.4,250 173.6,256.4 C175.2,262 174.4,269.2 172.8,274 Z" fill="url(#mx-skin)" />
+                  <path d="M161.6,258 C163.2,251.6 168,248.4 172,251.6" stroke="#c58a6d" strokeWidth="1.8" fill="none" opacity="0.7" />
+                  <path d="M166.4,255.6 L170.4,246" stroke="#f5d6bd" strokeWidth="4.2" strokeLinecap="round" />
+                  <path d="M172,257.2 L176.8,248.4" stroke="#f5d6bd" strokeWidth="4" strokeLinecap="round" />
                 </g>
 
                 {/* 10. 思考：头顶飘散的光点 */}
                 <g className="think-motes">
-                  <circle cx="248" cy="84" r="3.4" />
-                  <circle cx="272" cy="66" r="2.4" />
-                  <circle cx="226" cy="60" r="2.8" />
+                  <circle cx="242" cy="100" r="3.2" />
+                  <circle cx="264" cy="82" r="2.2" />
+                  <circle cx="220" cy="76" r="2.6" />
                 </g>
               </svg>
             </div>
@@ -698,19 +760,19 @@ interface EyeShape {
 
 const EYE_SHAPE: Record<Emotion, EyeShape> = {
   // 平静：上下弧都薄，正中
-  neutral: { up: 8, down: 6, tilt: 0, thick: 2.6 },
+  neutral: { up: 9, down: 6.7, tilt: 0, thick: 3 },
   // 好奇：睁大且外眼角上挑
-  curious: { up: 10.5, down: 6.5, tilt: -1.6, thick: 2.8 },
+  curious: { up: 11.8, down: 7.3, tilt: -1.6, thick: 3.2 },
   // 温和：下眼睑抬起 → 弯眼（但还留着可识别的眼白，别变成闭眼）
-  warm: { up: 9.5, down: 3.8, tilt: -1, thick: 2.8 },
+  warm: { up: 10.6, down: 4.3, tilt: -1, thick: 3.2 },
   // 愉悦：弯成月牙
-  amused: { up: 10, down: 2.2, tilt: -2, thick: 3 },
+  amused: { up: 11.2, down: 2.5, tilt: -2, thick: 3.5 },
   // 焦虑：睁大但上眼睑压低、外眼角下垂
-  anxious: { up: 9, down: 4.4, tilt: 1.8, thick: 2.4 },
+  anxious: { up: 10.1, down: 4.9, tilt: 1.8, thick: 2.8 },
   // 难过：眼睑沉、水光
-  sad: { up: 6.4, down: 4.6, tilt: 2.4, thick: 2.4, tear: true },
+  sad: { up: 7.2, down: 5.2, tilt: 2.4, thick: 2.8, tear: true },
   // 惊讶：最大
-  surprised: { up: 12.5, down: 7.6, tilt: -0.6, thick: 2.6 },
+  surprised: { up: 14, down: 8.5, tilt: -0.6, thick: 3 },
 };
 
 /** 瞳孔大小（惊讶最大，焦虑最紧） */

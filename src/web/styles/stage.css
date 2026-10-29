@@ -827,14 +827,14 @@
 
 .char-shoulders {
   transform-box: view-box;
-  transform-origin: 200px 352px;
+  transform-origin: 200px 360px;
   transform: translateY(var(--shoulder-drop, 0px)) scaleX(var(--shoulder-wide, 1));
   transition: transform 900ms cubic-bezier(0.22, 0.75, 0.25, 1);
 }
 
 .char-neck {
   transform-box: view-box;
-  transform-origin: 200px 322px;
+  transform-origin: 200px 336px;
   transform: translate(var(--neck-fwd, 0px), calc(var(--neck-fwd, 0px) * 0.5))
     rotate(calc(var(--neck-fwd, 0px) * -0.07));
   transition: transform 900ms cubic-bezier(0.22, 0.75, 0.25, 1);
@@ -842,7 +842,7 @@
 
 .char-head {
   transform-box: view-box;
-  transform-origin: 200px 312px;
+  transform-origin: 200px 330px;
   transform: rotate(var(--head-rot, 0deg)) translate(var(--head-x, 0px), var(--head-y, 0px))
     scaleX(var(--head-unyaw, 1)) skewX(var(--head-unskew, 0deg));
   transition: transform 980ms cubic-bezier(0.22, 0.75, 0.25, 1);
@@ -851,19 +851,19 @@
 /* 头部动作层：点头、抖动、别头发时的偏头都只动这一层 */
 .char-head-act {
   transform-box: view-box;
-  transform-origin: 200px 312px;
+  transform-origin: 200px 330px;
 }
 
 .char-hem {
   transform-box: view-box;
-  transform-origin: 200px 340px;
+  transform-origin: 200px 468px;
   animation: hemSway var(--hem-dur, 4.6s) ease-in-out infinite;
   animation-delay: var(--hem-delay, 0s);
 }
 
 .char-sidehair {
   transform-box: view-box;
-  transform-origin: 200px 340px;
+  transform-origin: 200px 242px;
   animation: hemSway var(--hem-dur, 4.6s) ease-in-out infinite;
   animation-delay: var(--hem-delay, 0s);
   animation-direction: alternate;
@@ -875,19 +875,19 @@
 }
 
 .char-arm-l {
-  transform-origin: 146px 350px;
+  transform-origin: 113px 369px;
   transform: rotate(var(--arm-l, 0deg));
 }
 
 .char-arm-r {
-  transform-origin: 254px 350px;
+  transform-origin: 287px 369px;
   transform: rotate(var(--arm-r, 0deg));
 }
 
 /* 别头发：抬起的手臂，靠透视缩短表现「伸过去」——不做整体平移 */
 .char-reach {
   transform-box: view-box;
-  transform-origin: 152px 352px;
+  transform-origin: 162px 348px;
   opacity: 0;
   transition: opacity 180ms linear;
 }
@@ -981,7 +981,7 @@
 .brow path {
   fill: none;
   stroke: #4a2f20;
-  stroke-width: 3.3;
+  stroke-width: 4;
   stroke-linecap: round;
 }
 
@@ -992,7 +992,7 @@
 
 .mouth path {
   stroke: #96524a;
-  stroke-width: 2.1;
+  stroke-width: 2.6;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
@@ -1006,6 +1006,13 @@
   transform-box: view-box;
   transform-origin: 200px 248px;
   transition: transform 90ms linear;
+}
+
+/* 嘴形整体加宽 20%：头缩到 0.8× 之后，原比例的嘴只占脸宽 16%（偏娃娃脸） */
+.char-jaw .mouths {
+  transform-box: view-box;
+  transform-origin: 200px 256px;
+  transform: scaleX(1.2);
 }
 
 .char-rig[data-emotion="neutral"] .brow-neutral { opacity: 0.92; }
