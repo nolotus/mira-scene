@@ -300,7 +300,7 @@ export class LiveDirector implements Director {
       if (signal.aborted) return;
 
       // ---- 收尾：补完台词 → 再补在后面才扫到的 cues ----
-      const payload = parseDirectorPayload(rawAll) ?? salvageSay(rawAll);
+      const payload = parseDirectorPayload(rawAll);
       const remainder = remainderOf(payload, emitted) || pending;
 
       for (const piece of chunkText(remainder)) {
