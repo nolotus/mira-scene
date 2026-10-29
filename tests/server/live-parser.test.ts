@@ -259,3 +259,52 @@ describe("LiveDirector · 模型输出违约", () => {
   });
 });
 
+
+describe("LiveDirector · 纯文本叙述（不带 JSON）", () => {
+  const PLAIN = "雨下这么大，你想让我淋成落汤鸡啊？不过店里暖气还开着。";
+
+  test("完全没有 JSON 结构 → 原文当台词放行，且不报错", async () => {
+    // 2026-10-29 线上实测：模型连续三轮直接吐 30~45 字纯叙述，emitted=0，
+    // 用户体感就是「她不回话」。这类输出没有任何结构字样，放行是安全的。
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      sseResponse(PLAIN.match(/[\s\S]{1,8}/g) ?? [PLAIN])) as unknown as typeof fetch;
+    try {
+      const director = new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 });
+      const events: SessionEvent[] = [];
+      for await (const event of director.stream(liveInput, new AbortController().signal)) {
+        events.push(event);
+      }
+      const text = events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
+      expect(text).toBe(PLAIN);
+      expect(events.filter((e) => e.type === "error")).toEqual([]);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("带任何 JSON 结构痕迹的残段仍然整段丢弃（不许放行）", async () => {
+    for (const dirty of [
+      '{"say": "台词", "directives": [',
+      "哦，听错了。!'directives': [{'kind':'emotion'}]}",
+      '废话一句 {"cues":[{"atChar":3}]}',
+    ]) {
+      const original = globalThis.fetch;
+      globalThis.fetch = (async () =>
+        sseResponse(dirty.match(/[\s\S]{1,6}/g) ?? [dirty])) as unknown as typeof fetch;
+      try {
+        const director = new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 });
+        const events: SessionEvent[] = [];
+        for await (const event of director.stream(liveInput, new AbortController().signal)) {
+          events.push(event);
+        }
+        const text = events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
+        expect(text).not.toContain("directives");
+        expect(text).not.toContain("cues");
+        expect(events.filter((e) => e.type === "error")).toEqual([]);
+      } finally {
+        globalThis.fetch = original;
+      }
+    }
+  });
+});
