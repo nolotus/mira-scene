@@ -7,7 +7,9 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { dockChipList, splitDockChips, visibleDockControls } from "../../src/web/ui/Dock";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { dockChipList, PushToTalkButton, splitDockChips, visibleDockControls } from "../../src/web/ui/Dock";
 import type { MicNotice } from "../../src/web/ui/availability";
 
 const noticeOf = (kind: MicNotice["kind"]): MicNotice => ({
@@ -157,5 +159,33 @@ describe("状态条最多常显 2 个", () => {
     });
     expect(list[1]?.label).toBe("未连接");
     expect(splitDockChips(list).visible.length).toBe(2);
+  });
+});
+
+describe("PushToTalkButton · 单一状态源与可见反馈", () => {
+  test("未按住状态：data-holding 为 false，主文案为按住说话", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PushToTalkButton, {
+        holding: false,
+        onStart: () => {},
+        onEnd: () => {},
+      })
+    );
+    expect(html).toContain('data-holding="false"');
+    expect(html).toContain('aria-pressed="false"');
+    expect(html).toContain(">按住说话 <kbd>Space</kbd></button>");
+  });
+
+  test("键盘/鼠标按住状态（单一状态源）：data-holding 为 true，主文案切换为松开结束", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PushToTalkButton, {
+        holding: true,
+        onStart: () => {},
+        onEnd: () => {},
+      })
+    );
+    expect(html).toContain('data-holding="true"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain(">松开结束 <kbd>Space</kbd></button>");
   });
 });

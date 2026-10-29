@@ -174,6 +174,8 @@ export interface DockProps extends DockFaultProps {
   /** 语音/权限相关的明确提示 */
   note: string | null;
   micLevel: number;
+  /** 全局按住说话统一状态源（键盘或鼠标激活） */
+  pttHolding?: boolean;
   onDraft(value: string): void;
   onSend(text: string): void;
   onInterrupt(): void;
@@ -185,7 +187,7 @@ export interface DockProps extends DockFaultProps {
 }
 
 function micLabelOf(view: SessionView, notice: MicNotice | null): string {
-  if (view.mic === "listening") return "关闭麦克风";
+  if (view.mic === "listening") return "持续倾听中（点击关闭）";
   if (view.mic === "requesting") return "正在请求麦克风权限";
   // 提示里带根因时，按钮上直接写出「为什么不能用」，不用点一下才知道
   if (notice) {
@@ -194,7 +196,7 @@ function micLabelOf(view: SessionView, notice: MicNotice | null): string {
     if (notice.kind === "stt") return "语音服务不可用";
     return "麦克风被拒";
   }
-  return "开启麦克风";
+  return "持续倾听：保持麦克风开启，自由闲聊（点击开启）";
 }
 
 // ================================================================ Dock
@@ -317,7 +319,11 @@ export function Dock(props: DockProps) {
         ) : null}
 
         {controls.ptt ? (
-          <PushToTalkButton onStart={props.onPushToTalkStart} onEnd={props.onPushToTalkEnd} />
+          <PushToTalkButton
+            holding={props.pttHolding ?? false}
+            onStart={props.onPushToTalkStart}
+            onEnd={props.onPushToTalkEnd}
+          />
         ) : null}
 
         <button
@@ -325,11 +331,13 @@ export function Dock(props: DockProps) {
           type="button"
           className="mira-btn mira-btn--more"
           onClick={() => setMoreOpen(true)}
-          aria-label={controls.moreDot ? "更多操作（有错误）" : "更多操作"}
+          aria-label={controls.moreDot ? "更多操作：重试、语言与设置（有错误）" : "更多操作：重试、语言与设置"}
+          title="更多：重试、识别语言、设置、细节"
           aria-haspopup="dialog"
           aria-expanded={moreOpen}
         >
-          <span aria-hidden="true">⋯</span>
+          <span className="mira-btn--more__icon" aria-hidden="true">⋯</span>
+          <span className="mira-btn--more__label">更多</span>
           {controls.moreDot ? <span className="mira-btn__dot" aria-hidden="true" /> : null}
         </button>
 
@@ -457,6 +465,7 @@ function MicButton({ label, mic, level, onToggle, onFocusInput }: MicButtonProps
     }
     onToggle();
   };
+  const subtext = listening ? "倾听中" : requesting ? "请求中" : "持续倾听";
   return (
     <button
       type="button"
@@ -472,7 +481,7 @@ function MicButton({ label, mic, level, onToggle, onFocusInput }: MicButtonProps
         aria-hidden="true"
         style={listening ? { transform: `scale(${1 + Math.min(0.35, level * 4)})` } : undefined}
       />
-      <svg className="mira-mic__icon" viewBox="0 0 24 24" width="24" height="24" aria-hidden="true" focusable="false">
+      <svg className="mira-mic__icon" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
         <path d="M12 3.2a3.1 3.1 0 0 1 3.1 3.1v5.9a3.1 3.1 0 0 1-6.2 0V6.3A3.1 3.1 0 0 1 12 3.2Z" fill="currentColor" />
         <path
           d="M5.6 11.4a6.4 6.4 0 0 0 12.8 0M12 17.8V21M9 21h6"
@@ -483,6 +492,9 @@ function MicButton({ label, mic, level, onToggle, onFocusInput }: MicButtonProps
         />
         {listening || requesting ? null : <path d="M4.6 19.4 19.4 4.6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />}
       </svg>
+      <span className="mira-mic__subtext" aria-hidden="true">
+        {subtext}
+      </span>
     </button>
   );
 }
@@ -525,30 +537,26 @@ function MicNoticeBlock({
 
 // ================================================================ 按住说话
 
-interface PushToTalkProps {
+export interface PushToTalkProps {
+  holding: boolean;
   onStart(): void;
   onEnd(): void;
 }
 
 /**
- * 按住说话：麦克风权限不可用时的明确替代交互。
+ * 按住说话：瞬时对讲模式（Push-to-Talk）。
  * 按下 = 打断 + 进入倾听；松开 = 结束识别（有转写就自动发送）。
  *
- * 为什么没并进麦克风按钮（短按切换 / 长按按住说话）：
- *  · 两者语义相反 —— 短按是「持久模式」，长按是「瞬时打断 + 倾听」，误判代价是"想开麦却打断了她"；
- *  · 220ms 阈值与 iOS 的系统长按（callout / 选择 / 拖拽）叠在一起，`touch-action:none` 只能降低概率；
- *  · 键盘和读屏拿不到"长按"，合并等于把这半个功能从无障碍通道里删掉。
- * 拆掉「重试 / 诊断 / 语言」之后横向空间并不紧张，所以独立按钮是更划算的一边。
+ * 状态源统一由 App 管理（单一真源）：无论是鼠标按住还是全局快捷键（空格/反引号），
+ * 均驱动同一个 holding 状态，按钮同步呈现按下高亮态与文案切换。
  */
-function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
-  const holdingRef = useRef(false);
-  /** 按下期间用于视觉反馈：没有它用户不知道到底开没开始录 */
-  const [holding, setHolding] = useState(false);
+export function PushToTalkButton({ holding, onStart, onEnd }: PushToTalkProps) {
+  const holdingRef = useRef(holding);
+  holdingRef.current = holding;
 
   useEffect(() => {
     return () => {
       if (holdingRef.current) {
-        holdingRef.current = false;
         onEnd();
       }
     };
@@ -557,8 +565,6 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
   const start = (event: PointerEvent<HTMLButtonElement>) => {
     event.preventDefault();
     if (holdingRef.current) return;
-    holdingRef.current = true;
-    setHolding(true);
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -569,8 +575,6 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
 
   const end = () => {
     if (!holdingRef.current) return;
-    holdingRef.current = false;
-    setHolding(false);
     onEnd();
   };
 
@@ -579,6 +583,7 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
       type="button"
       className="mira-btn mira-btn--ptt"
       data-holding={holding ? "true" : "false"}
+      aria-pressed={holding}
       onPointerDown={start}
       onPointerUp={end}
       onPointerCancel={end}
@@ -589,19 +594,19 @@ function PushToTalkButton({ onStart, onEnd }: PushToTalkProps) {
         // 键盘可达：空格/回车按下即开始，抬起即结束（读屏与键盘用户此前只能看到按钮但按了没反应）
         if ((event.key === " " || event.key === "Enter") && !event.repeat) {
           event.preventDefault();
-          start(event as unknown as PointerEvent<HTMLButtonElement>);
+          if (!holdingRef.current) onStart();
         }
       }}
       onKeyUp={(event) => {
         if (event.key === " " || event.key === "Enter") {
           event.preventDefault();
-          end();
+          if (holdingRef.current) onEnd();
         }
       }}
-      aria-label="按住说话：按下即打断并进入倾听，松开结束（也可以按住空格）"
-      title="按住说话：按下即打断并进入倾听，松开结束（也可以按住空格）"
+      aria-label={holding ? "正在说话：松开结束识别" : "按住说话：按下即打断并进入倾听，松开结束（也可以按住空格）"}
+      title={holding ? "正在说话：松开结束识别并自动发送" : "按住说话：按下即打断并进入倾听，松开结束（也可以按住空格）"}
     >
-      按住说话 <kbd>Space</kbd>
+      {holding ? "松开结束" : "按住说话"} <kbd>Space</kbd>
     </button>
   );
 }

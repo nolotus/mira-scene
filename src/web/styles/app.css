@@ -780,15 +780,26 @@ body {
   }
 }
 
-/* ⋯ 溢出按钮 */
+/* ⋯ 更多操作按钮（带文案降低认知成本） */
 .mira-btn--more {
+  position: relative;
   min-width: 44px;
   min-height: 44px;
-  font-size: 18px;
-  line-height: 1;
+  padding: 0 10px;
+  gap: 5px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.mira-btn--more__icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.mira-btn--more__label {
+  font-size: 12px;
+  letter-spacing: 0.02em;
 }
 
 .mira-btn__dot {
@@ -802,15 +813,18 @@ body {
   box-shadow: 0 0 0 2px rgba(9, 11, 16, 0.85);
 }
 
-/* 麦克风主按钮：直径 56px 圆形，四态靠颜色 / 动效 / 图标分辨 */
+/* 麦克风主按钮：直径 56px 圆形，明确标注「持续倾听」，四态靠颜色 / 动效 / 图标 / 状态文字分辨 */
 .mira-mic {
   position: relative;
   flex: 0 0 auto;
   width: 56px;
   height: 56px;
   border-radius: 50%;
-  display: inline-grid;
-  place-items: center;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
   border: 1px solid var(--mira-line);
   background: rgba(255, 255, 255, 0.07);
   color: var(--mira-ink);
@@ -822,6 +836,16 @@ body {
 .mira-mic__icon {
   position: relative;
   z-index: 1;
+}
+
+.mira-mic__subtext {
+  position: relative;
+  z-index: 1;
+  font-size: 9.5px;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  opacity: 0.88;
+  white-space: nowrap;
 }
 
 .mira-mic__ring {
