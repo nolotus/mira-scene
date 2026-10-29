@@ -386,3 +386,52 @@ describe("LiveDirector · 兜底不带动作", () => {
     }
   });
 });
+
+describe("LiveDirector · 上游故障也必须回话（Sol 复审的部署前最低要求）", () => {
+  const collect = async (director: LiveDirector): Promise<SessionEvent[]> => {
+    const events: SessionEvent[] = [];
+    for await (const event of director.stream(liveInput, new AbortController().signal)) {
+      events.push(event);
+    }
+    return events;
+  };
+  const textOf = (events: SessionEvent[]): string =>
+    events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
+
+  test("请求抛出（网络/超时）→ 有 error，但也必须有台词", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("boom");
+    }) as unknown as typeof fetch;
+    try {
+      const events = await collect(
+        new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 }),
+      );
+      expect(events.filter((e) => e.type === "error").length).toBe(1);
+      expect(textOf(events).length).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  test("HTTP 503 → 有 error（真实分类），但也必须有台词", async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("bad", { status: 503 })) as unknown as typeof fetch;
+    try {
+      const events = await collect(
+        new LiveDirector({ apiKey: FAKE_KEY, baseUrl: "http://127.0.0.1:1", timeoutMs: 5000 }),
+      );
+      const errors = events.filter((e) => e.type === "error") as Array<{ message: string }>;
+      expect(errors.length).toBe(1);
+      expect(errors[0]!.message).toContain("503");
+      expect(textOf(events).length).toBeGreaterThan(0);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  // 待补：「已输出后再抛错不重复兜底」。构造可控 reader（先吐完整 say 再 error）
+  // 需要比 sseResponse 更细的夹具，本轮先靠代码里 `if (!emitted)` 守卫；
+  // 已知风险是「部分台词 + 兜底句」的组合，需在后续用真实断流复现。
+});

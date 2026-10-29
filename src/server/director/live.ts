@@ -216,6 +216,9 @@ export class LiveDirector implements Director {
     if (signal.aborted) return;
     this.#lastStats = { cues: 0, droppedAtChar: 0, droppedDirective: 0, struct: decision };
 
+    // 已发出的台词累计：**包含**上游故障路径在内，所有分支都要据此判断
+    // 「这一轮到底有没有给过用户东西」（决定要不要补可信接话）。
+    let emitted = "";
     const controller = new AbortController();
     const forwardAbort = (): void => controller.abort();
     signal.addEventListener("abort", forwardAbort, { once: true });
@@ -256,11 +259,14 @@ export class LiveDirector implements Director {
           input,
           timedOut ? `上游模型超时（${this.#timeoutMs}ms）` : `上游模型请求失败：${describe(error)}`,
         );
+        // 错误照发（真实分类留在日志/UI），同时给一句可信接话 —— 用户不能只听到沉默
+        if (!emitted) yield* emitFallbackLine(input, signal);
         return;
       }
 
       if (!response.ok || !response.body) {
         yield this.#failure(input, `上游模型返回 ${response.status}：${await snippet(response)}`);
+        if (!emitted) yield* emitFallbackLine(input, signal);
         return;
       }
 
@@ -273,7 +279,6 @@ export class LiveDirector implements Director {
       let lineBuffer = "";
       let rawAll = "";
       let pending = "";
-      let emitted = "";
       let spoken = 0;
       let doneSeen = false;
 
@@ -423,6 +428,8 @@ export class LiveDirector implements Director {
     } catch (error) {
       if (signal.aborted) return;
       yield this.#failure(input, `导演流异常：${describe(error)}`);
+      // 读流中断同样属于「用户说完话却什么也没得到」：补一句接话（已发过台词则不补）
+      if (!emitted) yield* emitFallbackLine(input, signal);
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", forwardAbort);
@@ -484,6 +491,26 @@ const MAX_SAY_CHARS = 180;
  */
 const FALLBACK_LINE =
   "嗯，我在。刚才有点走神，你再说一句好不好？";
+
+/**
+ * 发出那句可信接话（只在**这一轮还没有任何台词**时调用）。
+ *
+ * 为什么上游故障也要走这里：客户端不会把 `error` 事件念出来/user 听不到，
+ * 「请求超时 / HTTP 503 / 读流中断」在体验上与「她不理我」完全一样。
+ * 所以错误照旧发（保留真实分类与可观测性），但**同时**给她一句可信接话，
+ * 保证非主动中断的轮次一定有回应（Sol 复审的部署前最低要求）。
+ */
+async function* emitFallbackLine(
+  input: DirectorInput,
+  signal: AbortSignal,
+): AsyncGenerator<SessionEvent> {
+  const text = FALLBACK_LINE.slice(0, MAX_SAY_CHARS);
+  for (const piece of chunkText(text)) {
+    if (signal.aborted) return;
+    yield { type: "text.delta", turnId: input.turnId, epoch: input.epoch, text: piece };
+    await sleep(LIVE_CHUNK_DELAY_MS, signal);
+  }
+}
 /**
  * 结构性字段名：模型输出不合法（单引号/漏引号）时用它当停止标记。
  * 必须覆盖当前提示词用到的每一个字段名——旧格式 `directives`、新格式 `cues`。

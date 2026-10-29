@@ -129,11 +129,15 @@ describe("LiveDirector · 上游不可用时的优雅降级", () => {
     const elapsed = performance.now() - startedAt;
 
     expect(elapsed).toBeLessThan(3000);
-    expect(events.length).toBe(1);
-    const [only] = events;
-    expect(only?.type).toBe("error");
+    // 新契约：一条 error（真实分类）+ 兜底接话（不 hang 的原意保留）
+    const errors = events.filter((e) => e.type === "error");
+    expect(errors).toHaveLength(1);
+    const [only] = errors;
     expect(only?.type === "error" ? only.recoverable : false).toBe(true);
     expect(only?.epoch).toBe(5);
+    expect(
+      events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("").length,
+    ).toBeGreaterThan(0);
     // 错误消息里不能带出密钥
     expect(only?.type === "error" ? only.message : "").not.toContain(FAKE_DEEPSEEK);
   });

@@ -262,8 +262,12 @@ describe("LiveDirector · 结构化输出档位", () => {
   test("上游 500 → 一条可恢复 error，不 hang", async () => {
     const fetchImpl = (async () => new Response("boom", { status: 500 })) as unknown as typeof fetch;
     const events = await collect(new LiveDirector({ apiKey: "sk-fake", baseUrl: "https://stub.invalid/x", model: "m", fetchImpl, struct: "json_object" }));
-    expect(events).toHaveLength(1);
-    expect(events[0]?.type).toBe("error");
-    if (events[0]?.type === "error") expect(events[0].recoverable).toBe(true);
+    // 新契约：上游故障也必须有回应 —— 一条 error（真实分类）+ 兜底接话。
+    // 「不 hang」的原意保留：事件流一定会结束。
+    const errors = events.filter((e) => e.type === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.type === "error" ? errors[0].recoverable : false).toBe(true);
+    const said = events.flatMap((e) => (e.type === "text.delta" ? [e.text] : [])).join("");
+    expect(said.length).toBeGreaterThan(0);
   });
 });
