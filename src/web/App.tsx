@@ -20,7 +20,7 @@ import {
 import { VoiceBargeInWiring } from "./voice/bargeInWiring";
 import { createFakeStt, parseFakeAecOverride, parseFakeSttFlag } from "./voice/fakeStt";
 import { parseBargeInFlag } from "./voice/bargeInFlag";
-import { isPttEnd, isPttStart } from "./ui/pttHotkey";
+import { isPttEnd, isPttStart, isPttStartBlockedByTyping } from "./ui/pttHotkey";
 import { describeAppliedMicSettings, readAecState, readMicDiagnostics } from "./voice/micConstraints";
 import { logTrace, markTrace, parseTraceFlag, publishTrace, setTraceEnabled } from "./voice/bargeInTrace";
 import { withAudioTrace } from "./voice/tracedTts";
@@ -770,7 +770,19 @@ export function App() {
   useEffect(() => {
     let holding = false;
     const start = (event: KeyboardEvent) => {
-      if (holding || !isPttStart(event)) return;
+      // 卡住的 holding（上次 keyup 被系统吞掉）不该把热键永久锁死：
+      // 只要不是当前这次按下，就按「已经松开过」处理。
+      if (holding && !event.repeat) {
+        holding = false;
+        pushToTalkEnd();
+      }
+      if (holding || !isPttStart(event)) {
+        // 在输入框里按空格是打字，不是坏掉 —— 给一句明确提示，避免体感成「热键没反应」
+        if (!holding && event.code === "Space" && !event.repeat && isPttStartBlockedByTyping(event)) {
+          setNote("按住说话要先点一下画面空白处；或按住 `\`` 键直接说话");
+        }
+        return;
+      }
       // 抽屉/对话框开着时不接管：那时空格属于对话框
       if (document.querySelector('[role="dialog"]')) return;
       event.preventDefault();
@@ -791,11 +803,14 @@ export function App() {
     window.addEventListener("keydown", start);
     window.addEventListener("keyup", end);
     window.addEventListener("blur", abort);
+    // 点鼠标说明手已经离开键盘：顺手清掉 holding，避免「按住不放」的假象
+    window.addEventListener("pointerdown", abort);
     document.addEventListener("visibilitychange", abort);
     return () => {
       window.removeEventListener("keydown", start);
       window.removeEventListener("keyup", end);
       window.removeEventListener("blur", abort);
+      window.removeEventListener("pointerdown", abort);
       document.removeEventListener("visibilitychange", abort);
       // 依赖变了会让本 effect 重挂（pushToTalkStart 依赖 store/tts）：
       // 这时 holding 随闭包作废，若不在这里收尾，底层录音会一直跑，

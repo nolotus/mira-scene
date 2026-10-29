@@ -5,7 +5,14 @@
  * 长按连发不许重复启动、抬起必须收尾（哪怕焦点已经移走）。
  */
 import { describe, expect, test } from "bun:test";
-import { isPttEnd, isPttStart, isTypingTarget, PTT_HOTKEY_CODE } from "../../src/web/ui/pttHotkey.ts";
+import {
+  isPttEnd,
+  isPttStart,
+  isPttStartBlockedByTyping,
+  isTypingTarget,
+  PTT_ALT_HOTKEY_CODE,
+  PTT_HOTKEY_CODE,
+} from "../../src/web/ui/pttHotkey.ts";
 
 /**
  * 伪造一个带 closest 的元素（模拟 DOM 节点）。
@@ -90,5 +97,29 @@ describe("按住说话：不许抢的场合", () => {
     expect(
       isPttStart({ code: PTT_HOTKEY_CODE, target: fakeElement("[tabindex]:not([tabindex='-1'])") }),
     ).toBe(false);
+  });
+});
+
+describe("备用热键：反引号（输入框里也能用）", () => {
+  test("反引号在普通位置 → 开始", () => {
+    expect(isPttStart({ code: PTT_ALT_HOTKEY_CODE, target: null })).toBe(true);
+  });
+
+  test("反引号在输入框里 → 依然开始（它不是打字键，不用让位）", () => {
+    expect(isPttStart({ code: PTT_ALT_HOTKEY_CODE, target: fakeElement("input") })).toBe(true);
+  });
+
+  test("空格在输入框里仍然不打（这条不能被破坏）", () => {
+    expect(isPttStart({ code: PTT_HOTKEY_CODE, target: fakeElement("input") })).toBe(false);
+  });
+
+  test("反引号抬起 → 结束", () => {
+    expect(isPttEnd({ code: PTT_ALT_HOTKEY_CODE })).toBe(true);
+  });
+
+  test("被输入框让位时可被识别出来（用于给用户提示，而不是静默无反应）", () => {
+    expect(isPttStartBlockedByTyping({ code: PTT_HOTKEY_CODE, target: fakeElement("input") })).toBe(true);
+    expect(isPttStartBlockedByTyping({ code: PTT_ALT_HOTKEY_CODE, target: fakeElement("input") })).toBe(false);
+    expect(isPttStartBlockedByTyping({ code: PTT_HOTKEY_CODE, target: null })).toBe(false);
   });
 });

@@ -12,6 +12,12 @@
 
 /** 热键：空格（`code` 而不是 `key`：中文输入法/不同布局下 key 会变，code 稳定） */
 export const PTT_HOTKEY_CODE = "Space";
+/**
+ * 备用热键：反引号。
+ * 空格在输入框聚焦时属于「打字」，必须让位 —— 那时用户按空格没反应是完全正确的行为，
+ * 但体感上就是「热键坏了」。给一个任何位置都生效的备用键，就不必先点空白处。
+ */
+export const PTT_ALT_HOTKEY_CODE = "Backquote";
 /** 给用户看的键名 */
 export const PTT_HOTKEY_LABEL = "空格";
 
@@ -66,14 +72,16 @@ export function isTypingTarget(target: EventTarget | null | undefined): boolean 
 
 /** 按下：是否该开始说话 */
 export function isPttStart(event: PttKeyEvent): boolean {
-  if (event.code !== PTT_HOTKEY_CODE) return false;
+  const isAlt = event.code === PTT_ALT_HOTKEY_CODE;
+  if (event.code !== PTT_HOTKEY_CODE && !isAlt) return false;
   // 输入法组合态：空格在选候选词，抢了就等于让人打不出中文
   if (event.isComposing) return false;
   // 长按的连发事件不再重复触发（否则每 30ms 重启一次识别）
   if (event.repeat) return false;
   // ⌘/Ctrl/Alt 组合键不抢（⌘Space 是系统级快捷键）；Shift+Space 是标准翻页
   if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return false;
-  if (isTypingTarget(event.target)) return false;
+  // 空格在输入框/按钮里让位给原本的用途；反引号不受此限（它不是打字键）
+  if (!isAlt && isTypingTarget(event.target)) return false;
   return true;
 }
 
@@ -84,5 +92,17 @@ export function isPttStart(event: PttKeyEvent): boolean {
  * 抬起那一刻仍必须把录音停下来。
  */
 export function isPttEnd(event: PttKeyEvent): boolean {
-  return event.code === PTT_HOTKEY_CODE || event.key === " ";
+  return (
+    event.code === PTT_HOTKEY_CODE ||
+    event.code === PTT_ALT_HOTKEY_CODE ||
+    event.key === " "
+  );
+}
+
+/**
+ * 「这次按空格被输入框让位掉了」——UI 用它给一句提示。
+ * 只用于提示，不参与是否接管热键的判定。
+ */
+export function isPttStartBlockedByTyping(event: PttKeyEvent): boolean {
+  return event.code === PTT_HOTKEY_CODE && !event.repeat && isTypingTarget(event.target);
 }
